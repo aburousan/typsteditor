@@ -660,6 +660,25 @@ if (existsSync(DIST_DIR)) {
   });
 }
 
+// Remove a locally-cached Typst package version.
+app.post('/packages/remove', (req, res) => {
+  const { name, version } = req.body || {};
+  if (!/^[\w-]+$/.test(name || '') || !/^[\w.]+$/.test(version || '')) return res.status(400).json({ error: 'Invalid package name/version.' });
+  const dir = typstCacheDir();
+  if (!dir) return res.status(400).json({ error: 'No package cache found.' });
+  const target = resolve(dir, name, version);
+  // Stay strictly inside the cache directory.
+  if (!target.startsWith(dir + sep)) return res.status(400).json({ error: 'Invalid path.' });
+  try {
+    if (!existsSync(target)) return res.status(404).json({ error: 'Not installed.' });
+    rmSync(target, { recursive: true, force: true });
+    // Remove the now-empty name folder too.
+    const nameDir = resolve(dir, name);
+    try { if (readdirSync(nameDir).length === 0) rmSync(nameDir, { recursive: true, force: true }); } catch {}
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 const PORT = 3001;
 // Bind to loopback by default so the server is never reachable from the network.
 // In Docker set HOST=0.0.0.0 and publish the port to 127.0.0.1 on the host.

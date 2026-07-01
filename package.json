@@ -36,10 +36,12 @@
       "electron/**",
       "package.json"
     ],
+    "afterPack": "electron/afterPack.cjs",
     "mac": {
       "target": [
         "dmg"
       ],
+      "identity": null,
       "category": "public.app-category.productivity"
     },
     "linux": {
@@ -52,8 +54,10 @@
     }
   },
   "dependencies": {
+    "@types/three": "^0.185.0",
     "cors": "^2.8.6",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "three": "^0.185.1"
   },
   "devDependencies": {
     "@monaco-editor/react": "^4.7.0",

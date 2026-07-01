@@ -13,6 +13,7 @@ import InputModal, { type InputModalConfig } from './components/InputModal';
 import CodeRunnerModal from './components/CodeRunnerModal';
 import SaveAsModal from './components/SaveAsModal';
 import PdfPreview from './components/PdfPreview';
+import Plot3DStudio from './components/Plot3DStudio';
 import './index.css';
 
 const SURFACE_3D_TEMPLATE = `import matplotlib
@@ -82,6 +83,27 @@ const FEYNMAN: Record<string, string> = {
     $
   )`,
 };
+
+// Boxed theorem-like environments (showybox). Each `kind` gets its own counter.
+const THEOREM_SETUP_BOXED = `#import "@preview/showybox:2.0.4": showybox
+#let _thmbox(kind, title, color) = {
+  let c = counter("thm-" + kind)
+  (name: none, body) => {
+    c.step()
+    context {
+      let head = [#title #c.display()] + if name != none { [ (#name)] }
+      showybox(title: head, frame: (title-color: rgb(color), border-color: rgb(color), body-color: rgb(color).lighten(88%), title-inset: 6pt), body)
+    }
+  }
+}
+#let theorem = _thmbox("theorem", "Theorem", "#2563eb")
+#let lemma = _thmbox("lemma", "Lemma", "#7c3aed")
+#let corollary = _thmbox("corollary", "Corollary", "#0891b2")
+#let proposition = _thmbox("proposition", "Proposition", "#c026d3")
+#let definition = _thmbox("definition", "Definition", "#059669")
+#let remark = _thmbox("remark", "Remark", "#64748b")
+#let example = _thmbox("example", "Example", "#d97706")
+#let proof(body) = block(inset: (left: 2pt))[_Proof._ #body #h(1fr) $square$]`;
 
 // Theorem-like environments (lemming). Each `kind` gets its own counter.
 const THEOREM_SETUP = `#import "@preview/lemming:0.3.1" as lem
@@ -156,6 +178,7 @@ export default function App() {
   const [inputModal, setInputModal] = useState<InputModalConfig | null>(null);
   const [codeRunner, setCodeRunner] = useState<null | { initialLang?: 'python' | 'julia' | 'wolfram'; initialCode?: string }>(null);
   const [showSaveAs, setShowSaveAs] = useState(false);
+  const [showPlot3D, setShowPlot3D] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   
   const [sidebarWidth, setSidebarWidth] = useState(250);
@@ -806,17 +829,20 @@ export default function App() {
     title: 'Insert Theorem / Proof',
     fields: [
       { key: 'kind', label: 'Environment (each kind is numbered separately)', type: 'select', default: 'theorem', options: ['theorem', 'lemma', 'corollary', 'proposition', 'definition', 'remark', 'example', 'proof'] },
+      { key: 'style', label: 'Style', type: 'select', default: 'plain', options: ['plain', 'boxed (coloured box)'], hint: 'Set once per document by the first theorem you insert.' },
       { key: 'name', label: 'Name / title (optional)', placeholder: 'e.g. Noether' },
-      { key: 'label', label: 'Label (optional)', placeholder: 'noether → @thm:noether' },
+      { key: 'label', label: 'Label (optional, plain style only)', placeholder: 'noether → @thm:noether' },
       { key: 'body', label: 'Statement', type: 'textarea', default: 'Statement here.' },
     ],
     onSubmit: (v) => {
-      ensureSetup('@preview/lemming', THEOREM_SETUP);
+      const boxed = v.style.startsWith('boxed');
+      // Marker matches both setups (each defines `#let theorem =`).
+      ensureSetup('#let theorem =', boxed ? THEOREM_SETUP_BOXED : THEOREM_SETUP);
       const body = v.body || '';
       if (v.kind === 'proof') { insertCode(`\n#proof[${body}]\n\n`); return; }
       const args = [];
       if (v.name) args.push(`name: "${v.name}"`);
-      if (v.label) args.push(`label: <thm:${v.label}>`);
+      if (v.label && !boxed) args.push(`label: <thm:${v.label}>`); // boxed style isn't cross-referenceable
       const argStr = args.length ? `(${args.join(', ')})` : '';
       insertCode(`\n#${v.kind}${argStr}[${body}]\n\n`);
     }
@@ -1128,6 +1154,7 @@ export default function App() {
                       <div className="dropdown-item" onClick={() => { setShowDiagramBuilder(true); setActiveMenu(null); }}>Diagram / Plot (2D, cetz)...</div>
                       <div className="dropdown-item" onClick={() => { insertCetz3D(); setActiveMenu(null); }}>3D Surface (cetz)...</div>
                       <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'python', initialCode: SURFACE_3D_TEMPLATE }); setActiveMenu(null); }}>3D Surface (Python/matplotlib)...</div>
+                      <div className="dropdown-item" onClick={() => { setShowPlot3D(true); setActiveMenu(null); }}>3D Plot Studio (rotate &amp; pick view)...</div>
                       <div className="dropdown-item" onClick={() => { insertFeynman(); setActiveMenu(null); }}>Feynman Diagram (fletcher)...</div>
                     </div>
                   </div>
@@ -1180,8 +1207,8 @@ export default function App() {
         )}
 
         <div className="header-right">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', cursor: 'pointer', opacity: 0.8 }} onClick={() => setTheme(t => t === 'typst-dark' ? 'typst-light' : 'typst-dark')} title="Toggle Editor Theme">
-            {theme === 'typst-dark' ? '🌙 Dark' : '☀️ Light'}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', cursor: 'pointer', opacity: 0.8 }} onClick={() => setTheme(t => t === 'typst-dark' ? 'typst-light' : 'typst-dark')} title="Code editor theme (the PDF preview has its own dark toggle)">
+            {theme === 'typst-dark' ? '🌙 Editor' : '☀️ Editor'}
           </div>
           <div style={{ opacity: 0.8, display: 'flex', alignItems: 'center' }} title="Words / Characters">
             {stats.words} Words
@@ -1418,6 +1445,7 @@ export default function App() {
       {inputModal && <InputModal {...inputModal} onClose={() => setInputModal(null)} />}
       {codeRunner && <CodeRunnerModal {...codeRunner} onClose={() => setCodeRunner(null)} onInsert={(code) => { insertCode(code); setCodeRunner(null); }} onInsertEquation={(latex, codeBlock) => { insertEquationFromLatex(latex, codeBlock); setCodeRunner(null); }} onChanged={fetchTree} />}
       {showSaveAs && activeTab && <SaveAsModal onClose={() => setShowSaveAs(false)} fileName={activeTabPath} content={activeTab.content} pdfUrl={pdfUrl} projectName={projectName} mainFile={currentMain} />}
+      {showPlot3D && <Plot3DStudio onClose={() => setShowPlot3D(false)} onGenerate={(code) => { setShowPlot3D(false); setCodeRunner({ initialLang: 'python', initialCode: code }); }} />}
       
       {showHistoryModal && (
         <div className="modal-overlay" onClick={() => setShowHistoryModal(false)}>

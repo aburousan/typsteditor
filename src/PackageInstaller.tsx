@@ -49,6 +49,16 @@ export function PackageInstaller({ onInsert, onClose }: PackageInstallerProps) {
     } catch { alert('Could not reach the local server.'); } finally { setBusy(null); }
   };
 
+  const remove = async (pkg: Package) => {
+    if (!confirm(`Remove @${pkg.name}:${pkg.version} from the local cache?`)) return;
+    setBusy(key(pkg));
+    try {
+      const res = await fetch(`${API}/packages/remove`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: pkg.name, version: pkg.version }) });
+      if (res.ok) await loadInstalled();
+      else alert((await res.json().catch(() => ({}))).error || 'Remove failed.');
+    } catch { alert('Could not reach the local server.'); } finally { setBusy(null); }
+  };
+
   const shownInstalled = filter.trim()
     ? installed.filter(p => (p.name + ' ' + p.description).toLowerCase().includes(filter.toLowerCase()))
     : installed;
@@ -64,7 +74,9 @@ export function PackageInstaller({ onInsert, onClose }: PackageInstallerProps) {
         <span className="pkg-authors">{pkg.authors?.length ? 'By: ' + pkg.authors.join(', ') : ''}</span>
         {isInstalled ? (
           <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span style={{ fontSize: '0.72rem', color: '#34d399' }}>✓ installed</span>
+            <button className="insert-btn" disabled={busy === key(pkg)} onClick={() => remove(pkg)} style={{ background: 'rgba(239,68,68,0.15)', color: '#f87171', borderColor: 'rgba(239,68,68,0.3)' }}>
+              {busy === key(pkg) ? '…' : 'Remove'}
+            </button>
             <button className="insert-btn" onClick={() => onInsert(pkg)}>Import</button>
           </span>
         ) : (
