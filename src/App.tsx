@@ -656,12 +656,11 @@ export default function App() {
       ],
       submitLabel: 'Wrap',
       onSubmit: (v) => {
-        // Inside #figure(...) the content must be an expression (no leading #) or a [content] block.
-        let inner = selected || 'image("image.png", width: 80%)';
-        if (inner.startsWith('#')) inner = inner.slice(1);
-        else if (selected) inner = `[${inner}]`;
+        // Wrap the selection as a [content] block so any number of markup
+        // statements (#set, #diagram, #image, #table, …) stay valid inside figure.
+        const inner = selected || '#image("image.png", width: 80%)';
         const tag = v.label ? ` <fig:${v.label}>` : '';
-        const fig = `#figure(\n  ${inner},\n  caption: [${v.caption}],\n)${tag}`;
+        const fig = `#figure(\n  [${inner}],\n  caption: [${v.caption}],\n)${tag}`;
         if (sel && !sel.isEmpty()) {
           editor.executeEdits('wrap-figure', [{ range: sel, text: fig, forceMoveMarkers: true }]);
           editor.focus();

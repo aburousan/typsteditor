@@ -3,7 +3,7 @@ import cors from 'cors';
 import { spawn, execFile, execFileSync } from 'child_process';
 import { writeFileSync, readFileSync, rmSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, cpSync, mkdtempSync } from 'fs';
 import { join, relative, dirname, resolve, sep } from 'path';
-import { tmpdir } from 'os';
+import { tmpdir, homedir } from 'os';
 
 const app = express();
 // Only allow the local dev UI to talk to this server.
@@ -567,8 +567,59 @@ app.get('/template/preview', (req, res) => {
   });
 });
 
-// Serve the built front-end (desktop / single-origin mode). API routes above
-// take precedence; anything else falls back to the SPA entry point.
+// ---------------------------------------------------------------------------
+// Typst package cache — list what's installed locally, and download new ones.
+// ---------------------------------------------------------------------------
+function typstCacheDir() {
+  const home = process.env.HOME || homedir();
+  return [
+    join(home, 'Library', 'Caches', 'typst', 'packages', 'preview'),
+    join(home, '.cache', 'typst', 'packages', 'preview'),
+  ].find(existsSync) || null;
+}
+
+app.get('/packages/installed', (req, res) => {
+  const dir = typstCacheDir();
+  if (!dir) return res.json([]);
+  const out = [];
+  for (const name of readdirSync(dir)) {
+    const nd = join(dir, name);
+    try { if (!statSync(nd).isDirectory()) continue; } catch { continue; }
+    for (const version of readdirSync(nd)) {
+      let description = '', authors = [];
+      try {
+        const toml = readFileSync(join(nd, version, 'typst.toml'), 'utf-8');
+        const dm = toml.match(/description\s*=\s*"([^"]*)"/); if (dm) description = dm[1];
+        const am = toml.match(/authors\s*=\s*\[([^\]]*)\]/); if (am) authors = am[1].split(',').map(s => s.replace(/["\s]/g, '')).filter(Boolean);
+      } catch {}
+      out.push({ name, version, description, authors });
+    }
+  }
+  out.sort((a, b) => a.name === b.name ? b.version.localeCompare(a.version) : a.name.localeCompare(b.name));
+  res.json(out);
+});
+
+app.post('/packages/download', (req, res) => {
+  const { name, version } = req.body || {};
+  if (!/^[\w-]+$/.test(name || '') || !/^[\w.]+$/.test(version || '')) return res.status(400).json({ error: 'Invalid package name/version.' });
+  const dir = mkdtempSync(join(tmpdir(), 'typst-pkg-'));
+  const file = join(dir, 't.typ');
+  writeFileSync(file, `#import "@preview/${name}:${version}"\n`);
+  const proc = spawn('typst', ['compile', file, join(dir, 'o.pdf')]);
+  let err = '';
+  proc.stderr.on('data', d => { err += d.toString(); });
+  proc.on('close', () => {
+    try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    // Typst fetches the package before evaluating, so it's cached even if the
+    // bare import errors — verify by looking in the cache.
+    const cache = typstCacheDir();
+    const installed = cache && existsSync(join(cache, name, version));
+    installed ? res.json({ ok: true }) : res.status(400).json({ error: err.split('\n')[0] || 'Could not download package.' });
+  });
+});
+
+// Serve the built front-end (desktop / single-origin mode). Registered LAST so
+// all API routes above take precedence; anything else falls back to the SPA.
 if (existsSync(DIST_DIR)) {
   app.use(express.static(DIST_DIR));
   app.use((req, res, next) => {
