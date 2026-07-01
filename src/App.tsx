@@ -32,6 +32,69 @@ ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
 plt.savefig("surface3d.png", dpi=150, bbox_inches="tight")
 print("saved surface3d.png")`;
 
+// Verified Feynman-diagram templates (fletcher). Each is a `diagram(...)` expression.
+const FEYNMAN: Record<string, string> = {
+  's-channel: e⁻e⁺ → μ⁻μ⁺': `diagram(
+    spacing: 2cm,
+    node((0, 0), $e^-$),
+    node((0, 2), $e^+$),
+    node((1, 1), $$, name: <v1>),
+    node((2, 1), $$, name: <v2>),
+    node((3, 1), $mu^-$),
+    node((3, -1), $mu^+$),
+    edge((0, 0), <v1>, "-|>"),
+    edge((0, 2), <v1>, "<|-"),
+    edge(<v1>, <v2>, $gamma$, "wave"),
+    edge(<v2>, (3, 1), "-|>"),
+    edge(<v2>, (3, -1), "<|-"),
+  )`,
+  'QED vertex: e⁻ → e⁻ γ': `diagram(
+    spacing: 2cm,
+    node((0, 0), $e^-$),
+    node((1, 0), $$, name: <x>),
+    node((2, 0), $e^-$),
+    node((1, -1.3), $gamma$),
+    edge((0, 0), <x>, "-|>"),
+    edge(<x>, (2, 0), "-|>"),
+    edge(<x>, (1, -1.3), "wave"),
+  )`,
+  'Compton: γe⁻ → γe⁻': `diagram(
+    spacing: 1.6cm,
+    node((0, 2), $gamma$), node((0, 0), $e^-$),
+    node((1.5, 1), $$, name: <a>),
+    node((3, 1), $$, name: <b>),
+    node((4.5, 2), $gamma$), node((4.5, 0), $e^-$),
+    edge((0, 0), <a>, "-|>"),
+    edge((0, 2), <a>, "wave"),
+    edge(<a>, <b>, $e^-$, "-|>"),
+    edge(<b>, (4.5, 0), "-|>"),
+    edge(<b>, (4.5, 2), "wave"),
+  )`,
+  'q q̄ → Z′ → b b̄ (math mode)': `diagram(
+    mark-scale: 130%,
+    $
+      edge("rdr", overline(q), "-<|-")
+      edge(#(4, 0), #(3.5, 0.5), b, "-<|-")
+      edge(#(4, 1), #(3.5, 0.5), overline(b), "-<|-", label-side: #left) \\
+      & & edge("d", "-<|-") & & edge(#(3.5, 0.5), #(2, 1), Z', "wave") \\
+      & & edge(#(3.5, 2.5), #(2, 2), gamma, "wave") \\
+      edge("rru", q, "-|>-") & \\
+    $
+  )`,
+};
+
+// Theorem-like environments (lemming). Each `kind` gets its own counter.
+const THEOREM_SETUP = `#import "@preview/lemming:0.3.1" as lem
+#let theorem = lem.environment.with(kind: "theorem")
+#let lemma = lem.environment.with(kind: "lemma")
+#let corollary = lem.environment.with(kind: "corollary")
+#let proposition = lem.environment.with(kind: "proposition")
+#let definition = lem.environment.with(kind: "definition")
+#let remark = lem.environment.with(kind: "remark")
+#let example = lem.environment.with(kind: "example")
+#let proof = lem.proof
+#show: lem.prepare()`;
+
 type FileNode = { type: 'file' | 'directory'; name: string; path: string; children?: FileNode[] };
 type Tab = { path: string; content: string; isDirty: boolean };
 
@@ -708,30 +771,42 @@ export default function App() {
   const insertFeynman = () => setInputModal({
     title: 'Insert Feynman Diagram (fletcher)',
     fields: [
-      { key: 'caption', label: 'Caption', default: '$e^- e^+ -> mu^- mu^+$ scattering' },
+      { key: 'template', label: 'Diagram', type: 'select', options: Object.keys(FEYNMAN), default: Object.keys(FEYNMAN)[0] },
+      { key: 'caption', label: 'Caption', default: 'Feynman diagram' },
       { key: 'label', label: 'Label (optional)', placeholder: 'feyn1 → @fig:feyn1' },
     ],
     onSubmit: (v) => {
-      ensureRule('@preview/fletcher', '#import "@preview/fletcher:0.5.5" as fletcher: diagram, node, edge');
+      ensureRule('@preview/fletcher', '#import "@preview/fletcher:0.5.8" as fletcher: diagram, node, edge');
       const tag = v.label ? ` <fig:${v.label}>` : '';
-      insertCode(
-`\n#figure(
-  diagram(
-    spacing: 2cm,
-    node((0, 0), $e^-$),
-    node((0, 2), $e^+$),
-    node((1, 1), $$, name: <v1>),
-    node((2, 1), $$, name: <v2>),
-    node((3, 1), $mu^-$),
-    node((3, -1), $mu^+$),
-    edge((0, 0), <v1>, "-|>"),
-    edge((0, 2), <v1>, "<|-"),
-    edge(<v1>, <v2>, $gamma$, "wave"),
-    edge(<v2>, (3, 1), "-|>"),
-    edge(<v2>, (3, -1), "<|-"),
-  ),
-  caption: [${v.caption}],
-)${tag}\n\n`);
+      const code = FEYNMAN[v.template] || FEYNMAN[Object.keys(FEYNMAN)[0]];
+      insertCode(`\n#figure(\n  ${code},\n  caption: [${v.caption}],\n)${tag}\n\n`);
+    }
+  });
+
+  // Ensure a multi-line preamble block exists once, at the top of the document.
+  const ensureSetup = (marker: string, block: string) => {
+    if (!activeTab || activeTab.content.includes(marker)) return;
+    const editor = editorRef.current, model = editor?.getModel();
+    if (editor && model) editor.executeEdits('setup', [{ range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 1 } as any, text: block + '\n\n', forceMoveMarkers: true }]);
+  };
+
+  const insertTheorem = () => setInputModal({
+    title: 'Insert Theorem / Proof',
+    fields: [
+      { key: 'kind', label: 'Environment (each kind is numbered separately)', type: 'select', default: 'theorem', options: ['theorem', 'lemma', 'corollary', 'proposition', 'definition', 'remark', 'example', 'proof'] },
+      { key: 'name', label: 'Name / title (optional)', placeholder: 'e.g. Noether' },
+      { key: 'label', label: 'Label (optional)', placeholder: 'noether → @thm:noether' },
+      { key: 'body', label: 'Statement', type: 'textarea', default: 'Statement here.' },
+    ],
+    onSubmit: (v) => {
+      ensureSetup('@preview/lemming', THEOREM_SETUP);
+      const body = v.body || '';
+      if (v.kind === 'proof') { insertCode(`\n#proof[${body}]\n\n`); return; }
+      const args = [];
+      if (v.name) args.push(`name: "${v.name}"`);
+      if (v.label) args.push(`label: <thm:${v.label}>`);
+      const argStr = args.length ? `(${args.join(', ')})` : '';
+      insertCode(`\n#${v.kind}${argStr}[${body}]\n\n`);
     }
   });
 
@@ -1006,6 +1081,7 @@ export default function App() {
                       <div className="dropdown-item" onClick={() => { insertInstitute(); setActiveMenu(null); }}>Institute...</div>
                       <div className="dropdown-item" onClick={() => { insertAbstract(); setActiveMenu(null); }}>Abstract</div>
                       <div className="dropdown-item" onClick={() => { insertHeading(); setActiveMenu(null); }}>Heading...</div>
+                      <div className="dropdown-item" onClick={() => { insertTheorem(); setActiveMenu(null); }}>Theorem / Proof / Lemma...</div>
                     </div>
                   </div>
                   <div className="dropdown-item has-submenu">
