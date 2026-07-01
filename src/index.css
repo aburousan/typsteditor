@@ -526,6 +526,12 @@ iframe.pdf-viewer {
 .pdf-page {
   margin: 0 auto 16px;
 }
+
+/* Dark PDF mode: invert the rendered pages (white→dark, black text→light) and
+   hue-rotate so coloured plots keep roughly their real colours. */
+.pdf-wrap.pdf-dark .pdf-scroll { background: #1b1b1f; }
+.pdf-wrap.pdf-dark .pdf-page canvas { filter: invert(0.92) hue-rotate(180deg); }
+.pdf-wrap.pdf-dark .pdf-page { box-shadow: 0 2px 10px rgba(0, 0, 0, 0.7); background: #111; }
 .pdf-zoom-select {
   background: transparent;
   color: var(--text-main);

@@ -18,6 +18,7 @@ export default function PdfPreview({ url, onWordClick }: { url: string, onWordCl
   // zoomFactor is relative to fit-width: 1 = fit, 1.2 = 120% of fit.
   const [zoomFactor, setZoomFactor] = useState(1);
   const [rasterTick, setRasterTick] = useState(0);
+  const [dark, setDark] = useState(false);
 
   const displayScale = (w: number, z: number) => Math.max(0.15, Math.min(((w - 28) / docCache.current.naturalW) * z, 8));
 
@@ -119,8 +120,11 @@ export default function PdfPreview({ url, onWordClick }: { url: string, onWordCl
   const selValue = isFit ? 'fit' : String(curPct);
 
   return (
-    <div className="pdf-wrap">
+    <div className={`pdf-wrap ${dark ? 'pdf-dark' : ''}`}>
       <div className="pdf-toolbar">
+        <button className={`pdf-btn ${dark ? 'active' : ''}`} onClick={() => setDark(d => !d)} title="Toggle dark PDF" style={{ marginRight: 'auto' }}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        </button>
         <button className="pdf-btn" onClick={() => setZoom(Math.max(zoomFactor / 1.15, 0.25))} title="Zoom out">−</button>
         <select className="pdf-zoom-select" value={selValue} title="Zoom (100% = fit width)"
           onChange={e => setZoom(e.target.value === 'fit' ? 1 : Number(e.target.value) / 100)}>

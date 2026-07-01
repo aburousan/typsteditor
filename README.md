@@ -62,9 +62,25 @@ Run Python/Julia/Wolfram and drop the result in as a typeset equation:
 ```bash
 git clone https://github.com/aburousan/typsteditor.git
 cd typsteditor
-npm install
+bash scripts/setup.sh   # installs Typst + Python deps and runs npm install (macOS/Linux)
 npm run dev
 ```
+
+`scripts/setup.sh` sets up everything you need (Typst CLI, the Python stack, npm
+deps). If you already have the tools, just `npm install && npm run dev`.
+
+### Docker (easiest — bundles Typst + Python)
+
+```bash
+docker build -t typst-editor .
+docker run --rm -p 127.0.0.1:3001:3001 -v "$PWD/workspace:/app/workspace" typst-editor
+# open http://localhost:3001
+```
+
+The image ships the **Typst CLI** and a **Python** stack (numpy/matplotlib/sympy), so
+nothing else is needed. Your documents persist in the mounted `workspace/` folder.
+Publish the port to `127.0.0.1` only (as above) — the code-execution feature runs code
+inside the container.
 
 `npm run dev` starts both the Vite dev server and the local backend. Open the printed
 URL (default <http://localhost:5173>); the backend listens on `http://127.0.0.1:3001`.

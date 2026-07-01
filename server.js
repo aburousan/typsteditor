@@ -661,9 +661,11 @@ if (existsSync(DIST_DIR)) {
 }
 
 const PORT = 3001;
-// Bind to loopback only so the server is never reachable from the network.
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`Typst compiler server running on http://127.0.0.1:${PORT}`);
+// Bind to loopback by default so the server is never reachable from the network.
+// In Docker set HOST=0.0.0.0 and publish the port to 127.0.0.1 on the host.
+const HOST = process.env.HOST || '127.0.0.1';
+app.listen(PORT, HOST, () => {
+  console.log(`Typst compiler server running on http://${HOST}:${PORT}`);
   console.log(`  code execution: ${ALLOW_EXEC ? 'ENABLED (sandbox/)' : 'disabled'}`);
   for (const [lang, list] of Object.entries(INTERPRETERS)) {
     if (list.length) console.log(`  ${lang}: ${list.map(o => o.label).join(', ')}`);
