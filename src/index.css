@@ -636,6 +636,29 @@ iframe.pdf-viewer {
   user-select: none;
 }
 
+.tree-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-del {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 3px;
+  opacity: 0;
+  flex-shrink: 0;
+}
+.tree-file:hover .tree-del,
+.tree-dir:hover .tree-del { opacity: 0.65; }
+.tree-del:hover { opacity: 1 !important; color: #f87171; background: rgba(239, 68, 68, 0.15); }
+
 .tree-dir:hover, .tree-file:hover {
   background: rgba(255, 255, 255, 0.05);
 }

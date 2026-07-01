@@ -279,6 +279,23 @@ export default function App() {
     });
   };
 
+  const deleteEntry = async (e: React.MouseEvent, path: string, isDir: boolean) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!confirm(`Delete ${isDir ? 'folder' : 'file'} "${path}"?${isDir ? '\nAll of its contents will be removed.' : ''}`)) return;
+    try {
+      await fetch(`http://localhost:3001/workspace/file?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
+    } catch {}
+    setTabs(prev => {
+      const remaining = prev.filter(t => t.path !== path && !t.path.startsWith(path + '/'));
+      if (activeTabPath === path || activeTabPath.startsWith(path + '/')) {
+        setActiveTabPath(remaining.length ? remaining[remaining.length - 1].path : '');
+      }
+      return remaining;
+    });
+    fetchTree();
+  };
+
   const createNewFile = async () => {
     const name = prompt('File name (use a slash for a subfolder, e.g. chapters/intro.typ):', 'new.typ');
     if (!name) return;
@@ -347,7 +364,7 @@ export default function App() {
       await fetchTree();
       const ext = (name.split('.').pop() || '').toLowerCase();
       let snippet: string;
-      if (ext === 'csv') snippet = `#let data = csv("${name}")\n#table(\n  columns: data.first().len(),\n  ..data.flatten(),\n)`;
+      if (ext === 'csv') snippet = `#let data = csv("${name}")\n// Preview: header + first 10 rows. \`data\` holds every row — widen the slice below to show more.\n#table(\n  columns: data.first().len(),\n  table.header(..data.first()),\n  ..data.slice(1, calc.min(11, data.len())).flatten(),\n)`;
       else if (ext === 'json') snippet = `#let data = json("${name}")\n// e.g. #data.at("key")`;
       else if (ext === 'yaml' || ext === 'yml') snippet = `#let data = yaml("${name}")`;
       else if (ext === 'toml') snippet = `#let data = toml("${name}")`;
@@ -806,14 +823,16 @@ export default function App() {
           <details open>
             <summary className="tree-dir">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-              {node.name}
+              <span className="tree-name">{node.name}</span>
+              <button className="tree-del" title="Delete folder" onClick={(e) => deleteEntry(e, node.path, true)}>×</button>
             </summary>
             <div className="tree-children">{node.children && renderTree(node.children)}</div>
           </details>
         ) : (
           <div className={`tree-file ${activeTabPath === node.path ? 'active' : ''}`} onClick={() => openFile(node.path)}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
-            {node.name}
+            <span className="tree-name">{node.name}</span>
+            <button className="tree-del" title="Delete file" onClick={(e) => deleteEntry(e, node.path, false)}>×</button>
           </div>
         )}
       </div>

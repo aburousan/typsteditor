@@ -88,9 +88,10 @@ app.post('/workspace/upload', express.raw({ type: '*/*', limit: '50mb' }), (req,
 
 app.delete('/workspace/file', (req, res) => {
   const full = safeWorkspacePath(req.query.path);
-  if (!full) return res.status(400).send('Invalid path');
+  if (!full || full === WORKSPACE_DIR) return res.status(400).send('Invalid path');
   try {
-    unlinkSync(full);
+    if (existsSync(full) && statSync(full).isDirectory()) rmSync(full, { recursive: true, force: true });
+    else unlinkSync(full);
     res.send('OK');
   } catch (e) { res.status(500).send('Error'); }
 });
