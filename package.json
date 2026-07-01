@@ -19,10 +19,29 @@
   "build": {
     "appId": "com.kaziaburousan.typsteditor",
     "productName": "Typst Editor",
-    "directories": { "output": "release" },
-    "files": ["dist/**", "server.js", "electron/**", "package.json"],
-    "mac": { "target": ["dmg"], "category": "public.app-category.productivity" },
-    "linux": { "target": ["AppImage", "deb"], "category": "Office", "maintainer": "Kazi Abu Rousan" }
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "server.js",
+      "electron/**",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Office",
+      "maintainer": "Kazi Abu Rousan"
+    }
   },
   "dependencies": {
     "cors": "^2.8.6",
@@ -46,5 +65,17 @@
     "react-dom": "^19.2.7",
     "typescript": "~6.0.2",
     "vite": "^8.1.1"
-  }
+  },
+  "keywords": [
+    "typst",
+    "editor",
+    "latex-alternative",
+    "physics",
+    "math",
+    "pdf",
+    "electron",
+    "offline",
+    "monaco",
+    "cetz"
+  ]
 }
