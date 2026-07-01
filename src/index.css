@@ -1,0 +1,722 @@
+:root {
+  --bg-color: #0f172a;
+  --panel-bg: #1e293b;
+  --panel-lighter: #334155;
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --accent: #8b5cf6;
+  --accent-color: #8b5cf6;
+  --accent-hover: #a78bfa;
+  --border-color: #334155;
+  --hover-color: rgba(148, 163, 184, 0.12);
+  --error-bg: #7f1d1d;
+  --error-text: #fecaca;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-color);
+  color: var(--text-main);
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* Header */
+.header {
+  height: 50px;
+  background-color: var(--panel-bg);
+  border-bottom: 1px solid var(--border-color);
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  padding: 0 16px;
+  z-index: 20;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.project-title {
+  font-size: 0.95rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.project-title:hover {
+  background-color: var(--panel-lighter);
+}
+
+.project-title-input {
+  font-size: 0.95rem;
+  font-weight: 500;
+  text-align: center;
+  color: var(--text-main);
+  background: var(--bg-color);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 4px 8px;
+  outline: none;
+  min-width: 180px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.logo {
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  background: linear-gradient(to right, #60a5fa, #c084fc);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Menu Bar */
+.menu-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.menu-item {
+  position: relative;
+  font-size: 0.85rem;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-main);
+  user-select: none;
+}
+
+.menu-item:hover {
+  background-color: var(--panel-lighter);
+}
+
+.dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background-color: var(--panel-lighter);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  min-width: 180px;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
+  padding: 4px 0;
+  z-index: 50;
+}
+
+.dropdown-item {
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  color: var(--text-main);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dropdown-item:hover {
+  background-color: var(--accent);
+  color: #fff;
+}
+
+.dropdown-divider {
+  height: 1px;
+  background-color: var(--border-color);
+  margin: 4px 0;
+}
+
+/* Nested submenus (flyout) */
+.dropdown-item.has-submenu {
+  justify-content: space-between;
+  position: relative;
+}
+.submenu-arrow {
+  opacity: 0.6;
+  font-size: 1rem;
+  margin-left: 12px;
+}
+.submenu {
+  position: absolute;
+  top: -5px;
+  left: 100%;
+  min-width: 210px;
+  background-color: var(--panel-lighter);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+  padding: 4px 0;
+  display: none;
+  z-index: 60;
+}
+.dropdown-item.has-submenu:hover > .submenu {
+  display: block;
+}
+
+/* Toolbar */
+.toolbar {
+  height: 44px;
+  background-color: var(--panel-bg);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  gap: 8px;
+  z-index: 10;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tool-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  border-radius: 6px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 7px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  gap: 6px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* unify the glyph buttons (B, I, U, A, x², ∑ ...) */
+.tool-btn b,
+.tool-btn i,
+.tool-btn u,
+.tool-btn span {
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.tool-btn:not(:disabled):hover {
+  background-color: var(--hover-color);
+  color: var(--accent-hover);
+}
+
+.tool-btn:not(:disabled):active {
+  transform: scale(0.92);
+}
+
+.tool-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.tool-btn.primary {
+  background-color: rgba(139, 92, 246, 0.15);
+  color: var(--accent-hover);
+  font-weight: 600;
+  padding: 6px 14px;
+}
+
+.tool-btn.primary:hover {
+  background-color: rgba(139, 92, 246, 0.3);
+  color: #fff;
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 20px;
+  background-color: var(--border-color);
+  margin: 0 4px;
+}
+
+.fontsize-select {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  height: 30px;
+  padding: 0 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.fontsize-select:hover { color: var(--accent-hover); border-color: var(--accent); }
+
+/* Status indicator */
+.header-status {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #10b981;
+}
+
+.status-dot.compiling {
+  background-color: #f59e0b;
+  animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.status-dot.error {
+  background-color: #ef4444;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Workspace */
+.workspace {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.editor-pane {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.preview-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background-color: #ffffff; /* White background for PDF */
+  position: relative;
+}
+
+body.is-resizing iframe,
+body.is-resizing .editor-container {
+  pointer-events: none;
+}
+
+.error-banner {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background-color: var(--error-bg);
+  color: var(--error-text);
+  padding: 8px 14px;
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-top: 1px solid #7f1d1d;
+  z-index: 20;
+  cursor: pointer;
+}
+
+/* Problems panel */
+.problem-badge {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 9px;
+  font-size: 10px;
+  padding: 1px 7px;
+  font-weight: 700;
+}
+.problem-item {
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  align-items: flex-start;
+}
+.problem-item:hover { background: var(--hover-color); }
+.problem-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-top: 5px;
+  flex-shrink: 0;
+}
+.problem-dot.error { background: #ef4444; }
+.problem-dot.warning { background: #f59e0b; }
+.problem-msg {
+  font-size: 12px;
+  color: var(--text-main);
+  line-height: 1.35;
+  white-space: normal;
+  word-break: break-word;
+}
+.problem-loc {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: monospace;
+  margin-top: 2px;
+}
+
+.empty-preview {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  background-color: var(--panel-bg);
+  font-size: 1.1rem;
+}
+
+/* Fix Monaco Tooltip flickering */
+.monaco-hover, .monaco-editor-hover, .monaco-tooltip {
+  display: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.symbols-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 5px;
+}
+
+.symbol-btn {
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 12px 5px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+
+.history-item:hover {
+  background: var(--hover-color);
+}
+.history-item:hover > div:nth-child(2) {
+  background: var(--accent-color) !important;
+  color: white !important;
+}
+
+.outline-item:hover {
+  background: var(--hover-color);
+  color: #fff !important;
+  border-radius: 4px;
+}
+
+.filename-input {
+  font-size: 24px;
+  font-weight: bold;
+}
+
+.symbol-btn:hover {
+  background: var(--hover-color);
+  border-color: var(--accent-color);
+}
+
+.sym-char {
+  font-size: 24px;
+  font-weight: bold;
+}
+
+.sym-code {
+  font-size: 11px;
+  color: #94a3b8;
+  font-family: monospace;
+}
+
+iframe.pdf-viewer {
+  flex: 1;
+  width: 100%;
+  border: none;
+  min-height: 100%;
+}
+
+/* PDF.js-based preview with a selectable text layer for click-to-source */
+.pdf-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.pdf-toolbar {
+  height: 34px;
+  flex-shrink: 0;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 0 10px;
+}
+.pdf-btn {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  border-radius: 5px;
+  min-width: 26px;
+  height: 24px;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pdf-btn:hover { background: var(--hover-color); border-color: var(--accent); }
+.pdf-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pdf-zoom { font-size: 12px; color: var(--text-muted); min-width: 42px; text-align: center; }
+.pdf-scroll {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  overflow: auto;
+  background: #525659;
+  padding: 16px 0;
+}
+/* Block layout + margin:auto so an over-wide (zoomed-in) page stays fully
+   scrollable on BOTH sides instead of having its left edge clipped — and the
+   scroll container itself must NOT grow to the content width. */
+.pdf-pages {
+  display: block;
+  width: 100%;
+}
+.pdf-page {
+  margin: 0 auto 16px;
+}
+.pdf-zoom-select {
+  background: transparent;
+  color: var(--text-main);
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  height: 24px;
+  font-size: 12px;
+  padding: 0 4px;
+  cursor: pointer;
+}
+.pdf-zoom-select:hover { border-color: var(--accent); }
+.pdf-page {
+  position: relative;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  background: #fff;
+}
+.pdf-page canvas { display: block; pointer-events: none; }
+.textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  z-index: 2;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  pointer-events: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.textLayer span::selection { background: rgba(139, 92, 246, 0.4); }
+.textLayer ::selection { background: rgba(139, 92, 246, 0.4); }
+
+/* brief flash when jumping to a synced word */
+.sync-flash { background: rgba(139, 92, 246, 0.35); border-radius: 2px; }
+
+/* Sidebar & File Tree */
+.sidebar {
+  min-width: 150px;
+  max-width: 400px;
+  background: var(--panel-bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.resizer {
+  width: 5px;
+  cursor: col-resize;
+  background-color: var(--border-color);
+  flex-shrink: 0;
+  transition: background-color 0.2s ease;
+  z-index: 10;
+}
+.resizer:hover, .resizer:active {
+  background-color: var(--accent);
+}
+
+.resizer-h {
+  height: 5px;
+  cursor: row-resize;
+  background-color: var(--border-color);
+  flex-shrink: 0;
+  transition: background-color 0.2s ease;
+}
+.resizer-h:hover, .resizer-h:active {
+  background-color: var(--accent);
+}
+
+.sidebar-header {
+  padding: 10px 15px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.file-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 0;
+}
+
+.tree-action { color: var(--text-muted); transition: color 0.15s ease; }
+.tree-action:hover { color: var(--accent-hover); }
+
+.tree-node {
+  font-size: 13px;
+  color: var(--text-main);
+}
+
+.tree-dir, .tree-file {
+  padding: 4px 15px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+
+.tree-dir:hover, .tree-file:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.tree-file.active {
+  background: rgba(139, 92, 246, 0.18);
+  color: #fff;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.tree-children {
+  padding-left: 15px;
+}
+
+details > summary {
+  list-style: none;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Tabs */
+.tabs {
+  display: flex;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+}
+
+.tab {
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel-lighter);
+  user-select: none;
+  min-width: fit-content;
+}
+
+.tab.active {
+  color: #fff;
+  background: var(--bg-color);
+  border-top: 2px solid var(--accent);
+}
+
+.tab-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.tab-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.editor-container {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.empty-editor {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-style: italic;
+}

@@ -1,0 +1,587 @@
+import express from 'express';
+import cors from 'cors';
+import { spawn, execFile, execFileSync } from 'child_process';
+import { writeFileSync, readFileSync, rmSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, cpSync, mkdtempSync } from 'fs';
+import { join, relative, dirname, resolve, sep } from 'path';
+import { tmpdir } from 'os';
+
+const app = express();
+// Only allow the local dev UI to talk to this server.
+app.use(cors({ origin: [/^http:\/\/localhost:\d+$/, /^http:\/\/127\.0\.0\.1:\d+$/] }));
+app.use(express.text({ limit: '50mb' }));
+app.use(express.json({ limit: '50mb' }));
+
+// Workspace and built-UI locations are overridable so the packaged desktop app
+// can point them at writable / bundled paths.
+const WORKSPACE_DIR = process.env.TYPST_WORKSPACE || join(process.cwd(), 'workspace');
+if (!existsSync(WORKSPACE_DIR)) {
+  mkdirSync(WORKSPACE_DIR, { recursive: true });
+}
+const DIST_DIR = process.env.TYPST_DIST || join(process.cwd(), 'dist');
+
+// Confine a user-supplied path to the workspace, blocking `../` traversal and
+// absolute paths that would escape it. Returns null when the path is unsafe.
+function safeWorkspacePath(p) {
+  if (typeof p !== 'string' || p.length === 0) return null;
+  const target = resolve(WORKSPACE_DIR, p);
+  if (target !== WORKSPACE_DIR && !target.startsWith(WORKSPACE_DIR + sep)) return null;
+  return target;
+}
+
+function getTree(dir) {
+  const items = readdirSync(dir);
+  const result = [];
+  for (const item of items) {
+    // Hide dotfiles, node_modules, the sandbox scratch dir and build output.
+    if (item.startsWith('.') || item === 'node_modules' || item === 'sandbox' || item.endsWith('.pdf')) continue;
+    const fullPath = join(dir, item);
+    const stat = statSync(fullPath);
+    if (stat.isDirectory()) {
+      result.push({ type: 'directory', name: item, path: relative(WORKSPACE_DIR, fullPath).replace(/\\/g, '/'), children: getTree(fullPath) });
+    } else {
+      result.push({ type: 'file', name: item, path: relative(WORKSPACE_DIR, fullPath).replace(/\\/g, '/') });
+    }
+  }
+  return result;
+}
+
+app.get('/workspace', (req, res) => {
+  res.json(getTree(WORKSPACE_DIR));
+});
+
+app.get('/workspace/file', (req, res) => {
+  const full = safeWorkspacePath(req.query.path);
+  if (!full) return res.status(400).send('Invalid path');
+  try {
+    res.send(readFileSync(full, 'utf-8'));
+  } catch (e) { res.status(404).send('Not found'); }
+});
+
+app.post('/workspace/file', (req, res) => {
+  const full = safeWorkspacePath(req.query.path);
+  if (!full) return res.status(400).send('Invalid path');
+  try {
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, typeof req.body === 'string' ? req.body : req.body.content || '');
+    res.send('OK');
+  } catch (e) { res.status(500).send('Error'); }
+});
+
+// Create an (empty) directory inside the workspace.
+app.post('/workspace/mkdir', (req, res) => {
+  const full = safeWorkspacePath(req.query.path);
+  if (!full) return res.status(400).send('Invalid path');
+  try { mkdirSync(full, { recursive: true }); res.send('OK'); }
+  catch (e) { res.status(500).send('Error'); }
+});
+
+// Upload a binary asset (e.g. an image) into the workspace.
+app.post('/workspace/upload', express.raw({ type: '*/*', limit: '50mb' }), (req, res) => {
+  const full = safeWorkspacePath(req.query.path);
+  if (!full) return res.status(400).send('Invalid path');
+  try {
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, req.body);
+    res.send('OK');
+  } catch (e) { res.status(500).send('Error'); }
+});
+
+app.delete('/workspace/file', (req, res) => {
+  const full = safeWorkspacePath(req.query.path);
+  if (!full) return res.status(400).send('Invalid path');
+  try {
+    unlinkSync(full);
+    res.send('OK');
+  } catch (e) { res.status(500).send('Error'); }
+});
+
+app.post('/compile', (req, res) => {
+  const mainPath = safeWorkspacePath(req.query.main || 'main.typ');
+  if (!mainPath) return res.status(400).json({ error: 'Invalid main path' });
+  const outputPath = join(WORKSPACE_DIR, 'out.pdf');
+  
+  if (req.body && typeof req.body === 'string' && req.body.trim().length > 0) {
+    try { writeFileSync(mainPath, req.body); } catch(e) {}
+  }
+  
+  const typstProcess = spawn('typst', ['compile', mainPath, outputPath], { cwd: WORKSPACE_DIR });
+  let stderr = '';
+  typstProcess.stderr.on('data', data => { stderr += data.toString(); });
+  
+  typstProcess.on('close', code => {
+    if (code !== 0) {
+      res.status(400).json({ error: stderr });
+    } else {
+      res.sendFile(outputPath);
+    }
+  });
+});
+
+app.post('/init-template', (req, res) => {
+  const { template } = req.body;
+  if (!template) return res.status(400).json({ error: 'Template name required' });
+
+  rmSync(WORKSPACE_DIR, { recursive: true, force: true });
+  const initProcess = spawn('typst', ['init', template, WORKSPACE_DIR]);
+  
+  let stderr = '';
+  initProcess.stderr.on('data', data => { stderr += data.toString(); });
+  
+  initProcess.on('close', code => {
+    if (code !== 0) return res.status(400).json({ error: stderr });
+    
+    try {
+      const files = readdirSync(WORKSPACE_DIR);
+      const typFile = files.find(f => f.endsWith('.typ')) || 'main.typ';
+      const content = readFileSync(join(WORKSPACE_DIR, typFile), 'utf-8');
+      res.json({ code: content });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to read template files' });
+    }
+  });
+});
+
+app.get('/packages', (req, res) => {
+  const query = req.query.q || '';
+  const searchProcess = spawn('python3', [
+    '/Users/kaziaburousan/.gemini/skills/typst/scripts/search-packages.py',
+    query,
+    '--json'
+  ]);
+  let output = '';
+  searchProcess.stdout.on('data', data => output += data.toString());
+  searchProcess.on('close', () => {
+    try {
+      res.json(output.trim() ? JSON.parse(output) : []);
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to parse package data' });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Git integration (real, via the local `git` CLI inside the workspace folder)
+// ---------------------------------------------------------------------------
+function git(args, opts = {}) {
+  return new Promise((resolve) => {
+    execFile('git', args, { cwd: WORKSPACE_DIR, ...opts }, (err, stdout, stderr) => {
+      resolve({ ok: !err, code: err ? (err.code ?? 1) : 0, stdout: stdout || '', stderr: stderr || '' });
+    });
+  });
+}
+
+const isRepo = () => existsSync(join(WORKSPACE_DIR, '.git'));
+
+app.get('/git/status', async (req, res) => {
+  if (!isRepo()) return res.json({ initialized: false });
+  const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const status = await git(['status', '--short']);
+  const remote = await git(['remote', 'get-url', 'origin']);
+  const files = status.stdout.split('\n').filter(Boolean).map(l => l.trim());
+  res.json({
+    initialized: true,
+    branch: branch.ok ? branch.stdout.trim() : 'main',
+    remote: remote.ok ? remote.stdout.trim() : null,
+    changes: files,
+    clean: files.length === 0
+  });
+});
+
+app.post('/git/init', async (req, res) => {
+  if (isRepo()) return res.json({ ok: true, message: 'Repository already initialized.' });
+  const init = await git(['init', '-b', 'main']);
+  if (!init.ok) return res.status(500).json({ error: init.stderr || 'git init failed' });
+  // Sensible defaults so commits don't fail on a fresh machine.
+  await git(['config', 'user.name', 'Typst Editor']);
+  await git(['config', 'user.email', 'typst-editor@localhost']);
+  writeFileSync(join(WORKSPACE_DIR, '.gitignore'), '*.pdf\nout.pdf\n.DS_Store\n');
+  res.json({ ok: true, message: 'Initialized empty Git repository.' });
+});
+
+app.post('/git/remote', async (req, res) => {
+  if (!isRepo()) return res.status(400).json({ error: 'Repository not initialized.' });
+  const { url } = req.body || {};
+  if (!url) return res.status(400).json({ error: 'Repository URL required.' });
+  const has = await git(['remote', 'get-url', 'origin']);
+  const r = has.ok ? await git(['remote', 'set-url', 'origin', url]) : await git(['remote', 'add', 'origin', url]);
+  if (!r.ok) return res.status(500).json({ error: r.stderr || 'Failed to set remote.' });
+  res.json({ ok: true });
+});
+
+app.post('/git/commit', async (req, res) => {
+  if (!isRepo()) {
+    const init = await git(['init', '-b', 'main']);
+    if (!init.ok) return res.status(500).json({ error: init.stderr });
+    await git(['config', 'user.name', 'Typst Editor']);
+    await git(['config', 'user.email', 'typst-editor@localhost']);
+  }
+  const message = (req.body && req.body.message) || 'Update from Typst Editor';
+  await git(['add', '-A']);
+  const commit = await git(['commit', '-m', message]);
+  if (!commit.ok) {
+    const msg = (commit.stdout + commit.stderr).toLowerCase();
+    if (msg.includes('nothing to commit')) return res.json({ ok: true, message: 'Nothing to commit — working tree clean.' });
+    return res.status(500).json({ error: commit.stderr || commit.stdout || 'Commit failed.' });
+  }
+  res.json({ ok: true, message: commit.stdout.trim() });
+});
+
+app.post('/git/push', async (req, res) => {
+  if (!isRepo()) return res.status(400).json({ error: 'Repository not initialized.' });
+  const { url, token, branch } = req.body || {};
+  const br = branch || 'main';
+  let pushUrl = url;
+  // Inject a GitHub token into the HTTPS URL so the push is non-interactive.
+  if (token && url && url.startsWith('https://')) {
+    pushUrl = url.replace('https://', `https://${token}@`);
+  }
+  if (pushUrl) {
+    const setRemote = (await git(['remote', 'get-url', 'origin'])).ok
+      ? await git(['remote', 'set-url', 'origin', pushUrl])
+      : await git(['remote', 'add', 'origin', pushUrl]);
+    if (!setRemote.ok) return res.status(500).json({ error: setRemote.stderr });
+  }
+  const push = await git(['push', '-u', 'origin', br]);
+  // Scrub the token from any echoed output before returning it.
+  const scrub = (s) => token ? s.split(token).join('***') : s;
+  if (!push.ok) return res.status(500).json({ error: scrub(push.stderr || 'Push failed.') });
+  res.json({ ok: true, message: scrub(push.stderr || push.stdout || 'Pushed.') });
+});
+
+app.get('/git/log', async (req, res) => {
+  if (!isRepo()) return res.json({ commits: [] });
+  const log = await git(['log', '--pretty=format:%h%an%ar%s', '-n', '20']);
+  const commits = log.ok ? log.stdout.split('\n').filter(Boolean).map(l => {
+    const [hash, author, date, subject] = l.split('');
+    return { hash, author, date, subject };
+  }) : [];
+  res.json({ commits });
+});
+
+// ---------------------------------------------------------------------------
+// Local-folder sync (works with the Google Drive Desktop synced folder)
+// ---------------------------------------------------------------------------
+app.post('/drive/sync', (req, res) => {
+  const { folder } = req.body || {};
+  if (!folder) return res.status(400).json({ error: 'Target folder path required.' });
+  try {
+    mkdirSync(folder, { recursive: true });
+    let count = 0;
+    const copyAll = (dir) => {
+      for (const item of readdirSync(dir)) {
+        if (item === '.DS_Store' || item === '.git' || item.endsWith('.pdf')) continue;
+        const src = join(dir, item);
+        const rel = relative(WORKSPACE_DIR, src);
+        const dest = join(folder, rel);
+        if (statSync(src).isDirectory()) { mkdirSync(dest, { recursive: true }); copyAll(src); }
+        else { mkdirSync(dirname(dest), { recursive: true }); cpSync(src, dest); count++; }
+      }
+    };
+    copyAll(WORKSPACE_DIR);
+    res.json({ ok: true, count, folder });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Export a single file (compiled PDF or Typst source) into a target folder.
+// ---------------------------------------------------------------------------
+app.post('/export', (req, res) => {
+  const { format, folder, name, main } = req.body || {};
+  if (!folder) return res.status(400).json({ error: 'Destination folder required.' });
+  const mainFile = main || 'main.typ';
+  try {
+    mkdirSync(folder, { recursive: true });
+    if (format === 'typ') {
+      const target = join(folder, `${name || 'document'}.typ`);
+      cpSync(join(WORKSPACE_DIR, mainFile), target);
+      return res.json({ ok: true, target });
+    }
+    if (format === 'pdf' || format === 'html') {
+      const ext = format === 'html' ? 'html' : 'pdf';
+      const target = join(folder, `${name || 'document'}.${ext}`);
+      const args = ['compile', '--format', ext, ...(format === 'html' ? ['--features', 'html'] : []), join(WORKSPACE_DIR, mainFile), target];
+      const proc = spawn('typst', args, { cwd: WORKSPACE_DIR });
+      let err = '';
+      proc.stderr.on('data', d => { err += d.toString(); });
+      proc.on('close', code => code === 0 ? res.json({ ok: true, target }) : res.status(400).json({ error: err || 'Compilation failed.' }));
+      return;
+    }
+    res.status(400).json({ error: 'Unknown format.' });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// Compile to HTML and return it (for in-browser download).
+app.get('/compile/html', (req, res) => {
+  const mainPath = safeWorkspacePath(req.query.main || 'main.typ');
+  if (!mainPath) return res.status(400).json({ error: 'Invalid main path' });
+  const out = join(WORKSPACE_DIR, '.out.html');
+  const proc = spawn('typst', ['compile', '--format', 'html', '--features', 'html', mainPath, out], { cwd: WORKSPACE_DIR });
+  let err = '';
+  proc.stderr.on('data', d => { err += d.toString(); });
+  proc.on('close', code => code === 0 ? res.sendFile(out, { dotfiles: 'allow' }) : res.status(400).json({ error: err || 'HTML export failed.' }));
+});
+
+// ---------------------------------------------------------------------------
+// WebDAV sync (Nextcloud, ownCloud, any WebDAV server).
+// ---------------------------------------------------------------------------
+function collectWorkspace(dir = WORKSPACE_DIR, prefix = '') {
+  const out = [];
+  for (const item of readdirSync(dir)) {
+    if (item.startsWith('.') || item === 'node_modules' || item === 'sandbox' || item.endsWith('.pdf')) continue;
+    const full = join(dir, item);
+    const rel = prefix ? `${prefix}/${item}` : item;
+    if (statSync(full).isDirectory()) out.push(...collectWorkspace(full, rel));
+    else out.push({ rel, full });
+  }
+  return out;
+}
+
+app.post('/webdav/sync', async (req, res) => {
+  const { url, username, password } = req.body || {};
+  if (!url) return res.status(400).json({ error: 'WebDAV URL required.' });
+  const auth = 'Basic ' + Buffer.from(`${username || ''}:${password || ''}`).toString('base64');
+  const base = url.endsWith('/') ? url : url + '/';
+  try {
+    const files = collectWorkspace();
+    const madeDirs = new Set();
+    let count = 0;
+    for (const f of files) {
+      // Ensure parent collections exist (MKCOL is idempotent-ish; ignore failures).
+      const parts = f.rel.split('/');
+      let acc = '';
+      for (let i = 0; i < parts.length - 1; i++) {
+        acc += (acc ? '/' : '') + parts[i];
+        if (!madeDirs.has(acc)) { madeDirs.add(acc); await fetch(base + acc, { method: 'MKCOL', headers: { Authorization: auth } }).catch(() => {}); }
+      }
+      const put = await fetch(base + f.rel.split('/').map(encodeURIComponent).join('/'), {
+        method: 'PUT', headers: { Authorization: auth }, body: readFileSync(f.full)
+      });
+      if (!put.ok && ![200, 201, 204].includes(put.status)) {
+        if (put.status === 401) throw new Error('Authentication failed (check username / app password).');
+        throw new Error(`Upload of ${f.rel} failed (HTTP ${put.status}).`);
+      }
+      count++;
+    }
+    res.json({ ok: true, count });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Live code execution (Python / Julia / Wolfram).
+//
+// SANDBOX: scripts and their outputs live in workspace/sandbox so generated
+// files never clobber the document source. Execution is gated by the
+// ALLOW_CODE_EXECUTION env var (default ON for local use). Set it to "0" before
+// exposing this server to anyone else — running arbitrary code is unsafe.
+// ---------------------------------------------------------------------------
+const ALLOW_EXEC = process.env.ALLOW_CODE_EXECUTION !== '0';
+const SANDBOX_DIR = join(WORKSPACE_DIR, 'sandbox');
+const IMAGE_EXT = ['.png', '.jpg', '.jpeg', '.svg', '.gif'];
+const EXEC_TIMEOUT_MS = Number(process.env.EXEC_TIMEOUT_MS || 45000);
+
+function which(name) {
+  try { return execFileSync('/usr/bin/which', [name], { encoding: 'utf-8' }).trim() || null; }
+  catch { return null; }
+}
+
+// Discover every interpreter we can offer, so the UI can let users pick an
+// environment (e.g. a specific conda env) without editing config files.
+function detectInterpreters() {
+  const home = process.env.HOME || '';
+  const out = { python: [], julia: [], wolfram: [] };
+
+  const basePy = which('python3') || which('python') || [`${home}/miniconda3/bin/python3`, '/opt/homebrew/bin/python3', '/usr/bin/python3'].find(existsSync);
+  if (basePy) out.python.push({ label: 'Default (python3)', path: basePy });
+  for (const root of ['miniconda3', 'anaconda3', 'mambaforge', 'miniforge3']) {
+    const envsDir = join(home, root, 'envs');
+    if (existsSync(envsDir)) {
+      for (const env of readdirSync(envsDir)) {
+        const p = join(envsDir, env, 'bin', 'python');
+        if (existsSync(p)) out.python.push({ label: `conda: ${env}`, path: p });
+      }
+    }
+  }
+  // pyenv / venvs
+  const venvDir = join(home, '.virtualenvs');
+  if (existsSync(venvDir)) for (const env of readdirSync(venvDir)) {
+    const p = join(venvDir, env, 'bin', 'python');
+    if (existsSync(p)) out.python.push({ label: `venv: ${env}`, path: p });
+  }
+
+  const jl = which('julia') || [`${home}/.juliaup/bin/julia`, '/opt/homebrew/bin/julia', '/usr/local/bin/julia'].find(existsSync);
+  if (jl) out.julia.push({ label: 'Default (julia)', path: jl });
+
+  const wl = which('wolframscript') || ['/usr/local/bin/wolframscript', '/opt/homebrew/bin/wolframscript'].find(existsSync);
+  if (wl) out.wolfram.push({ label: 'WolframScript', path: wl });
+
+  return out;
+}
+const INTERPRETERS = detectInterpreters();
+
+app.get('/tools', (req, res) => {
+  res.json({
+    execEnabled: ALLOW_EXEC,
+    interpreters: INTERPRETERS,
+    available: {
+      python: INTERPRETERS.python.length > 0,
+      julia: INTERPRETERS.julia.length > 0,
+      wolfram: INTERPRETERS.wolfram.length > 0,
+    }
+  });
+});
+
+const EXT = { python: 'py', julia: 'jl', wolfram: 'wls' };
+
+// Auto-convert a result to LaTeX so users write plain maths (e.g. `D[Sin[x^2], x]`)
+// and still get a typeset equation — without writing TeXForm / latex() themselves.
+function wrapForEquation(lang, code) {
+  const lines = code.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#') && !l.startsWith('//'));
+  if (lines.length === 0) return code;
+  if (lang === 'wolfram') {
+    return `Print[ToString[TeXForm[(\n${lines.join(';\n')}\n)]]]`;
+  }
+  if (lang === 'python') {
+    const last = lines[lines.length - 1];
+    const setup = lines.slice(0, -1).join('\n');
+    return `from sympy import *\nx, y, z, t, n, k, a, b, c = symbols('x y z t n k a b c')\n${setup}\nprint(latex(${last}))`;
+  }
+  if (lang === 'julia') {
+    const last = lines[lines.length - 1];
+    const setup = lines.slice(0, -1).join('\n');
+    return `using Latexify\n${setup}\nprint(latexify(${last}))`;
+  }
+  return code;
+}
+
+// Extra safety layer: refuse code that does process spawning, networking, shell
+// access or destructive file ops. Heuristic, NOT a real sandbox — see README.
+const DENY = {
+  common: [/\bsubprocess\b/, /\bsocket\b/, /\bos\.system\b/, /\bos\.popen\b/, /\bpopen\b/i, /\beval\s*\(/, /\bexec\s*\(/, /\b__import__\b/, /\brequests\b/, /\burllib\b/, /\bshutil\b/, /\bos\.remove\b/, /\bos\.unlink\b/, /\brmtree\b/, /\bpickle\b/, /\bctypes\b/, /\bos\.environ\b/],
+  julia: [/\brun\s*\(/, /\bdownload\s*\(/, /\bSys\.\w/, /\bccall\b/, /\bpipeline\s*\(/, /\bopen\s*\(`/, /\brm\s*\(/, /\bmv\s*\(/],
+  wolfram: [/\bRun\s*\[/, /\bRunProcess\s*\[/, /\bStartProcess\s*\[/, /\bDeleteFile\s*\[/, /\bDeleteDirectory\s*\[/, /\bURL(Fetch|Read|Submit|Save)\s*\[/, /\bSystemOpen\s*\[/, /\bCreateFile\s*\[/, /\bImport\s*\[\s*"https?:/i],
+};
+function screenCode(lang, code) {
+  const patterns = [...DENY.common, ...(DENY[lang] || [])];
+  for (const re of patterns) {
+    const m = code.match(re);
+    if (m) return m[0];
+  }
+  return null;
+}
+
+app.post('/run', (req, res) => {
+  if (!ALLOW_EXEC) return res.status(403).json({ error: 'Code execution is disabled on this server (ALLOW_CODE_EXECUTION=0).' });
+  let { lang, code, bin, outputMode } = req.body || {};
+  if (!code || !lang || !EXT[lang]) return res.status(400).json({ error: 'Valid lang and code are required.' });
+
+  const blocked = screenCode(lang, code);
+  if (blocked) return res.status(400).json({ error: `Blocked for safety: code uses "${blocked}" (process/network/filesystem access is not allowed). Disable this check only if you trust the code.` });
+
+  if (outputMode === 'equation') code = wrapForEquation(lang, code);
+
+  // Pick the interpreter: an explicit path if it is one we detected, else the default.
+  const options = INTERPRETERS[lang] || [];
+  const chosen = options.find(o => o.path === bin) || options[0];
+  if (!chosen) return res.status(400).json({ error: `${lang} is not available on this system.` });
+
+  mkdirSync(SANDBOX_DIR, { recursive: true });
+  const scriptName = `_run.${EXT[lang]}`;
+  const scriptPath = join(SANDBOX_DIR, scriptName);
+
+  const listImages = () => readdirSync(SANDBOX_DIR).filter(f => IMAGE_EXT.some(e => f.toLowerCase().endsWith(e)));
+  const before = new Set(listImages());
+
+  try { writeFileSync(scriptPath, code); } catch { return res.status(500).json({ error: 'Could not write script.' }); }
+
+  const args = lang === 'wolfram' ? ['-file', scriptName] : [scriptName];
+  const child = spawn(chosen.path, args, { cwd: SANDBOX_DIR });
+  let stdout = '', stderr = '', killed = false;
+  const timer = setTimeout(() => { killed = true; child.kill('SIGKILL'); }, EXEC_TIMEOUT_MS);
+
+  child.stdout.on('data', d => { stdout += d.toString(); });
+  child.stderr.on('data', d => { stderr += d.toString(); });
+  child.on('error', err => {
+    clearTimeout(timer);
+    res.status(500).json({ error: `Failed to start ${lang}: ${err.message}` });
+  });
+  child.on('close', (codeNum) => {
+    clearTimeout(timer);
+    // Report new images, referenced relative to the workspace (sandbox/<file>).
+    const images = listImages().filter(f => !before.has(f)).map(f => `sandbox/${f}`);
+    res.json({
+      ok: codeNum === 0 && !killed,
+      exitCode: codeNum,
+      timedOut: killed,
+      interpreter: chosen.label,
+      stdout,
+      stderr: stderr.replace(/Connecting….*?\n/g, ''), // strip WolframScript kernel noise
+      images
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Render a one-page preview of a Typst Universe template (cached on disk).
+// ---------------------------------------------------------------------------
+const PREVIEW_CACHE = join(WORKSPACE_DIR, '.previews');
+app.get('/template/preview', (req, res) => {
+  const name = String(req.query.name || '');
+  const version = String(req.query.version || '');
+  if (!/^[\w-]+$/.test(name)) return res.status(400).json({ error: 'Invalid template name.' });
+  mkdirSync(PREVIEW_CACHE, { recursive: true });
+  const cached = join(PREVIEW_CACHE, `${name}-${version || 'latest'}.png`);
+  if (existsSync(cached)) return res.sendFile(cached, { dotfiles: 'allow' });
+
+  const dir = mkdtempSync(join(tmpdir(), 'typst-tpl-'));
+  const target = join(dir, 't');
+  const spec = version ? `@preview/${name}:${version}` : `@preview/${name}`;
+  const done = (status, payload) => { try { rmSync(dir, { recursive: true, force: true }); } catch {} res.status(status).json(payload); };
+
+  const init = spawn('typst', ['init', spec, target]);
+  const initTimer = setTimeout(() => init.kill('SIGKILL'), 45000);
+  init.on('error', () => { clearTimeout(initTimer); done(500, { error: 'typst not found' }); });
+  init.on('close', code => {
+    clearTimeout(initTimer);
+    if (code !== 0) return done(400, { error: 'Could not scaffold template.' });
+    let files;
+    try { files = readdirSync(target); } catch { return done(500, { error: 'No template files.' }); }
+    const main = files.find(f => /^main\.typ$/i.test(f)) || files.find(f => f.endsWith('.typ'));
+    if (!main) return done(400, { error: 'No .typ entry point.' });
+    const out = join(target, 'preview.png');
+    const comp = spawn('typst', ['compile', '--format', 'png', '--pages', '1', join(target, main), out], { cwd: target });
+    const compTimer = setTimeout(() => comp.kill('SIGKILL'), 45000);
+    comp.on('close', c2 => {
+      clearTimeout(compTimer);
+      if (c2 !== 0 || !existsSync(out)) return done(400, { error: 'Could not render preview.' });
+      try { cpSync(out, cached); } catch {}
+      try { rmSync(dir, { recursive: true, force: true }); } catch {}
+      res.sendFile(cached, { dotfiles: 'allow' });
+    });
+  });
+});
+
+// Serve the built front-end (desktop / single-origin mode). API routes above
+// take precedence; anything else falls back to the SPA entry point.
+if (existsSync(DIST_DIR)) {
+  app.use(express.static(DIST_DIR));
+  app.use((req, res, next) => {
+    if (req.method === 'GET' && !req.path.includes('.')) res.sendFile(join(DIST_DIR, 'index.html'));
+    else next();
+  });
+}
+
+const PORT = 3001;
+// Bind to loopback only so the server is never reachable from the network.
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`Typst compiler server running on http://127.0.0.1:${PORT}`);
+  console.log(`  code execution: ${ALLOW_EXEC ? 'ENABLED (sandbox/)' : 'disabled'}`);
+  for (const [lang, list] of Object.entries(INTERPRETERS)) {
+    if (list.length) console.log(`  ${lang}: ${list.map(o => o.label).join(', ')}`);
+  }
+});

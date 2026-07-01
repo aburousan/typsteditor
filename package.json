@@ -1,0 +1,51 @@
+{
+  "name": "typst-editor",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A local, offline editor for Typst aimed at maths/physics writing.",
+  "author": "Kazi Abu Rousan",
+  "license": "MIT",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently \"node server.js\" \"vite\"",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "electron": "electron .",
+    "app": "npm run build && electron .",
+    "dist": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "com.kaziaburousan.typsteditor",
+    "productName": "Typst Editor",
+    "files": ["dist/**", "server.js", "electron/**", "package.json"],
+    "extraResources": [],
+    "mac": { "target": ["dmg"], "category": "public.app-category.productivity" },
+    "linux": { "target": ["AppImage", "deb"], "category": "Office" }
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "concurrently": "^10.0.3",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "pdfjs-dist": "^4.10.38",
+    "puppeteer": "^25.2.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "oxlint": "^1.71.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1"
+  }
+}
