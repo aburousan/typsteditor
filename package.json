@@ -7,6 +7,14 @@
   "license": "MIT",
   "type": "module",
   "main": "electron/main.cjs",
+  "homepage": "https://github.com/aburousan/typsteditor",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aburousan/typsteditor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aburousan/typsteditor/issues"
+  },
   "scripts": {
     "dev": "concurrently \"node server.js\" \"vite\"",
     "build": "tsc -b && vite build",

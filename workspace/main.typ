@@ -11,3 +11,6 @@
 = Typst with Physics and CeTZ!
 
 This is a local, offline editor for *Typst*. It comes pre-configured with packages!
+test
+
+pi
