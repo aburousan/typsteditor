@@ -3,6 +3,61 @@ import { typstCompletions } from './typstCompletions';
 let themesDefined = false;
 let providersRegistered = false;
 
+// Boilerplate for the common element/layout/model functions: completing one
+// drops in its key arguments as tab-stops (${1}, ${2}, …) so you're not left
+// staring at empty parentheses. Only the functions people actually type by hand
+// are listed — everything else keeps its default insert text.
+const SNIPPETS: Record<string, string> = {
+  // Layout containers
+  block: 'block(${1:body})',
+  box: 'box(${1:body})',
+  figure: 'figure(\n  ${1:body},\n  caption: [${2:caption}],\n)',
+  table: 'table(\n  columns: ${1:2},\n  ${2:[a], [b]},\n)',
+  grid: 'grid(\n  columns: ${1:2},\n  ${2:[a], [b]},\n)',
+  stack: 'stack(\n  dir: ${1:ttb},\n  ${2:[a], [b]},\n)',
+  columns: 'columns(${1:2})[${2:body}]',
+  pad: 'pad(${1:1em})[${2:body}]',
+  align: 'align(${1:center})[${2:body}]',
+  place: 'place(${1:top + left})[${2:body}]',
+  move: 'move(dx: ${1:0pt}, dy: ${2:0pt})[${3:body}]',
+  rotate: 'rotate(${1:45deg})[${2:body}]',
+  scale: 'scale(${1:80%})[${2:body}]',
+  rect: 'rect(width: ${1:2cm}, height: ${2:1cm})[${3:body}]',
+  square: 'square(size: ${1:2cm})[${2:body}]',
+  circle: 'circle(radius: ${1:1cm})[${2:body}]',
+  ellipse: 'ellipse(width: ${1:3cm}, height: ${2:2cm})[${3:body}]',
+  line: 'line(start: (${1:0pt}, ${2:0pt}), end: (${3:2cm}, ${4:0pt}))',
+  polygon: 'polygon((${1:0pt}, ${2:0pt}), (${3:2cm}, ${4:0pt}), (${5:1cm}, ${6:2cm}))',
+  // Media & text
+  image: 'image("${1:path.png}", width: ${2:80%})',
+  text: 'text(${1:size: 12pt})[${2:body}]',
+  raw: 'raw("${1:code}", lang: "${2:python}")',
+  underline: 'underline[${1:text}]',
+  overline: 'overline[${1:text}]',
+  strike: 'strike[${1:text}]',
+  highlight: 'highlight[${1:text}]',
+  strong: 'strong[${1:text}]',
+  emph: 'emph[${1:text}]',
+  super: 'super[${1:text}]',
+  sub: 'sub[${1:text}]',
+  // Model / structure
+  heading: 'heading(level: ${1:1})[${2:title}]',
+  link: 'link("${1:https://}")[${2:text}]',
+  ref: 'ref(<${1:label}>)',
+  cite: 'cite(<${1:key}>)',
+  footnote: 'footnote[${1:note}]',
+  quote: 'quote(attribution: [${1:author}])[${2:text}]',
+  list: 'list(\n  [${1:first}],\n  [${2:second}],\n)',
+  enum: 'enum(\n  [${1:first}],\n  [${2:second}],\n)',
+  terms: 'terms(\n  ([${1:term}], [${2:description}]),\n)',
+  bibliography: 'bibliography("${1:refs.bib}")',
+  // Spacing / breaks
+  v: 'v(${1:1em})',
+  h: 'h(${1:1em})',
+  page: 'page(paper: "${1:a4}")[${2:body}]',
+  par: 'par(justify: ${1:true})[${2:body}]',
+};
+
 export function setupTypstLanguage(monacoInstance: any) {
   const languageId = 'typst';
 
@@ -183,12 +238,20 @@ export function setupTypstLanguage(monacoInstance: any) {
   if (providersRegistered) return;
   providersRegistered = true;
 
+  const SNIPPET_RULE = monacoInstance.languages.CompletionItemInsertTextRule.InsertAsSnippet;
   monacoInstance.languages.registerCompletionItemProvider(languageId, {
     provideCompletionItems: () => {
       // Hide Typst's experimental HTML-export elements (html.h1, html.div, …):
       // they're irrelevant when writing PDFs and just clutter suggestions (e.g.
       // "#h3" was offering an HTML element).
-      const suggestions = typstCompletions(monacoInstance).filter((s: any) => s.detail !== 'HTML');
+      const suggestions = typstCompletions(monacoInstance)
+        .filter((s: any) => s.detail !== 'HTML')
+        .map((s: any) => {
+          // Give common functions argument boilerplate so completing them lands
+          // you on the first parameter instead of empty "()".
+          const snip = SNIPPETS[s.label];
+          return snip ? { ...s, insertText: snip, insertTextRules: SNIPPET_RULE } : s;
+        });
       return { suggestions };
     }
   });

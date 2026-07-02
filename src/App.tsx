@@ -692,7 +692,7 @@ export default function App() {
 
   #v(0.4em)
   ${v.author} \\
-  #text(fill: gray)[${v.institute}]${v.email ? ` \\\n  #link("mailto:${v.email}")[${v.email}]` : ''}
+  #text(fill: gray)[${v.institute}]${v.email ? ` \\\n  #link("mailto:${v.email}")[${v.email.replace(/@/g, '\\@')}]` : ''}
 ]
 
 `)
@@ -704,7 +704,7 @@ export default function App() {
       { key: 'author', label: 'Author name', default: 'Kazi Abu Rousan' },
       { key: 'email', label: 'Email (optional)', default: 'kaziaburousan@gmail.com' },
     ],
-    onSubmit: (v) => insertAtTop(`#align(center)[${v.author}${v.email ? ` \\\n  #link("mailto:${v.email}")[${v.email}]` : ''}]\n`)
+    onSubmit: (v) => insertAtTop(`#align(center)[${v.author}${v.email ? ` \\\n  #link("mailto:${v.email}")[${v.email.replace(/@/g, '\\@')}]` : ''}]\n`)
   });
 
   const insertInstitute = () => setInputModal({
