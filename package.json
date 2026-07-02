@@ -76,6 +76,7 @@
     "concurrently": "^10.0.3",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8",
+    "monaco-editor": "^0.55.1",
     "oxlint": "^1.71.0",
     "pdfjs-dist": "^4.10.38",
     "puppeteer": "^25.2.1",

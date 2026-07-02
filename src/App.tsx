@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
 import Editor, { useMonaco } from '@monaco-editor/react';
-import { setupTypstLanguage } from './typstMonaco';
+import { setupTypstLanguage, lookupTypstDoc, type TypstDoc } from './typstMonaco';
 import { PackageInstaller } from './PackageInstaller';
 import { TemplateInstaller } from './TemplateInstaller';
 import DiagramBuilder from './components/DiagramBuilder';
 import FigureBuilder from './components/FigureBuilder';
+import QuiverDiagram from './components/QuiverDiagram';
 import EditSettings from './components/EditSettings';
 import SymbolPicker from './components/SymbolPicker';
 import DriveSyncModal from './components/DriveSyncModal';
@@ -13,7 +14,8 @@ import InputModal, { type InputModalConfig } from './components/InputModal';
 import CodeRunnerModal from './components/CodeRunnerModal';
 import SaveAsModal from './components/SaveAsModal';
 import PdfPreview from './components/PdfPreview';
-import Plot3DStudio from './components/Plot3DStudio';
+// Loaded on demand: pulls in all of three.js, which nothing else needs.
+const Plot3DStudio = lazy(() => import('./components/Plot3DStudio'));
 import SymbolDraw from './components/SymbolDraw';
 import RefManager from './components/RefManager';
 import BibManager from './components/BibManager';
@@ -36,27 +38,6 @@ ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
 plt.savefig("surface3d.png", dpi=150, bbox_inches="tight")
 print("saved surface3d.png")`;
 
-// Feynman-diagram templates (fletcher, math-mode `diagram($...$)` syntax — the
-// grid layout reads like an equation and renders cleanly).
-const FEYNMAN: Record<string, string> = {
-  'e⁻e⁺ annihilation → γ (s-channel)': `diagram($
-    e^- edge("rd", "-<|-") & & & edge("ld", "-|>-") e^+ \\
-    & edge("r", gamma, "wave") & \\
-    e^+ edge("ru", "-|>-") & & & edge("lu", "-<|-") e^- \\
-  $)`,
-  'QED vertex: e⁻ → e⁻ γ': `diagram($
-    & gamma edge("d", "wave") & \\
-    e^- edge("r", "-|>-") & edge("r", "-|>-") & e^-
-  $)`,
-  'Møller scattering: e⁻e⁻ → e⁻e⁻ (t-channel)': `diagram($
-    e^- edge("r", "-|>-") & edge("d", gamma, "wave") edge("r", "-|>-") & e^- \\
-    e^- edge("r", "-|>-") & edge("r", "-|>-") & e^-
-  $)`,
-  'Compton scattering: γe⁻ → e⁻γ': `diagram($
-    gamma edge("r", "wave") & edge("d", e^-, "-|>-") edge("ru", gamma, "wave") & \\
-    e^- edge("r", "-|>-") & edge("ru", "-|>-") &
-  $)`,
-};
 
 // Boxed theorem-like environments (showybox). Each `kind` gets its own counter.
 const THEOREM_SETUP_BOXED = `#import "@preview/showybox:2.0.4": showybox
@@ -142,6 +123,7 @@ export default function App() {
   const [showSymbolPicker, setShowSymbolPicker] = useState(false);
   const [showDiagramBuilder, setShowDiagramBuilder] = useState(false);
   const [showFigureBuilder, setShowFigureBuilder] = useState(false);
+  const [showQuiver, setShowQuiver] = useState(false);
   const [showEditSettings, setShowEditSettings] = useState(false);
   const [showDriveSync, setShowDriveSync] = useState(false);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
@@ -154,6 +136,7 @@ export default function App() {
   const [showSaveAs, setShowSaveAs] = useState(false);
   const [showPlot3D, setShowPlot3D] = useState(false);
   const [showSymbolDraw, setShowSymbolDraw] = useState(false);
+  const [docPopup, setDocPopup] = useState<{ info: TypstDoc; x: number; y: number } | { notFound: string } | null>(null);
   const [showRefManager, setShowRefManager] = useState(false);
   const [showBibManager, setShowBibManager] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -663,6 +646,15 @@ export default function App() {
     editor.focus();
   };
 
+  // Replace the current selection with `text` (wrapping it), or insert at the
+  // cursor when nothing is selected.
+  const replaceOrInsert = (sel: any, editor: any, model: any, text: string) => {
+    if (sel && model && !sel.isEmpty()) {
+      editor.executeEdits('wrap', [{ range: sel, text, forceMoveMarkers: true }]);
+      editor.focus();
+    } else insertCode(text);
+  };
+
   // Insert content near the top of the document, just after the preamble
   // (leading #import / #set / comment / blank lines). Used for title, author,
   // institute and abstract, which belong at the top regardless of the cursor.
@@ -813,16 +805,35 @@ export default function App() {
   const centerWrap = (text: string, center: string) =>
     center === 'true' ? `\n#align(center)[\n${text.trim()}\n]\n\n` : `\n${text.trim()}\n\n`;
 
+  const MAT_DELIMS: Record<string, string> = { '( )': '', '[ ]': 'delim: "[",', '{ }': 'delim: "{",', '| |': 'delim: "|",', '‖ ‖': 'delim: "||",', 'none': 'delim: #none,' };
   const insertMatrix = () => setInputModal({
     title: 'Insert Matrix',
     fields: [
       { key: 'rows', label: 'Rows', type: 'number', default: '2' },
       { key: 'cols', label: 'Columns', type: 'number', default: '2' },
+      { key: 'delim', label: 'Brackets', type: 'select', default: '( )', options: Object.keys(MAT_DELIMS) },
+      { key: 'align', label: 'Cell alignment', type: 'select', default: 'center', options: ['center', 'left', 'right'] },
+      { key: 'vline', label: 'Vertical line after column (0 = none)', type: 'number', default: '0', hint: 'Draws an augmentation line — e.g. for [A|b].' },
+      { key: 'hline', label: 'Horizontal line after row (0 = none)', type: 'number', default: '0' },
+      { key: 'linecolor', label: 'Line colour', type: 'select', default: 'default', options: ['default', 'red', 'blue', 'green', 'orange', 'gray', 'purple'], hint: 'Colour of the augmentation lines.' },
+      { key: 'linethickness', label: 'Line thickness', default: '0.5pt' },
       { key: 'center', label: 'Center on page', type: 'checkbox', default: 'false' },
     ],
     onSubmit: (v) => {
       const r = Math.max(1, parseInt(v.rows) || 1), c = Math.max(1, parseInt(v.cols) || 1);
-      let mat = '$ mat(\n';
+      const vl = parseInt(v.vline) || 0, hl = parseInt(v.hline) || 0;
+      const opts: string[] = [];
+      if (MAT_DELIMS[v.delim]) opts.push('  ' + MAT_DELIMS[v.delim]);
+      if (v.align !== 'center') opts.push(`  align: ${v.align},`);
+      if (vl > 0 || hl > 0) {
+        const parts: string[] = [];
+        if (vl > 0) parts.push(`vline: ${vl}`);
+        if (hl > 0) parts.push(`hline: ${hl}`);
+        const s = strokeExpr(v.linethickness, v.linecolor);
+        if (s) parts.push(`stroke: ${s}`);
+        opts.push(`  augment: #(${parts.join(', ')}),`);
+      }
+      let mat = '$ mat(\n' + (opts.length ? opts.join('\n') + '\n' : '');
       for (let i = 0; i < r; i++) mat += '  ' + Array(c).fill('0').join(', ') + (i < r - 1 ? ';' : '') + '\n';
       mat += ') $';
       insertCode(centerWrap(mat, v.center));
@@ -832,18 +843,271 @@ export default function App() {
   const insertTable = () => setInputModal({
     title: 'Insert Table',
     fields: [
-      { key: 'rows', label: 'Rows', type: 'number', default: '2' },
-      { key: 'cols', label: 'Columns', type: 'number', default: '2' },
+      { key: 'rows', label: 'Rows (incl. header)', type: 'number', default: '3' },
+      { key: 'cols', label: 'Columns', type: 'number', default: '3' },
+      { key: 'header', label: 'Bold coloured header row', type: 'checkbox', default: 'true' },
+      { key: 'headercolor', label: 'Header colour', type: 'select', default: 'blue', options: ['blue', 'gray', 'green', 'orange', 'purple', 'red'] },
+      { key: 'stripe', label: 'Zebra striping', type: 'checkbox', default: 'false' },
+      { key: 'align', label: 'Cell alignment', type: 'select', default: 'left', options: ['left', 'center', 'right', 'horizon'] },
+      { key: 'border', label: 'Border', type: 'select', default: 'all lines', options: ['all lines', 'none', 'horizontal only'] },
+      { key: 'borderthickness', label: 'Border thickness', default: '0.5pt' },
+      { key: 'bordercolor', label: 'Border colour', type: 'select', default: 'gray', options: ['gray', 'black', 'blue', 'red', 'green'] },
       { key: 'center', label: 'Center on page', type: 'checkbox', default: 'false' },
     ],
     onSubmit: (v) => {
       const r = Math.max(1, parseInt(v.rows) || 1), c = Math.max(1, parseInt(v.cols) || 1);
-      let t = `#table(\n  columns: ${c},\n`;
-      for (let i = 0; i < r; i++) t += '  ' + Array(c).fill('[]').join(', ') + ',\n';
-      t += ')';
+      const hdr = v.header === 'true', stripe = v.stripe === 'true';
+      const bcol = v.bordercolor === 'gray' ? 'luma(200)' : v.bordercolor;
+      const bstroke = `${(v.borderthickness || '0.5pt').trim()} + ${bcol}`;
+      const strokeMap: Record<string, string> = {
+        'all lines': `  stroke: ${bstroke},`,
+        'none': '  stroke: none,',
+        'horizontal only': `  stroke: (x, y) => (top: ${bstroke}, bottom: ${bstroke}),`,
+      };
+      const lines: string[] = [`  columns: ${c},`, `  align: ${v.align} + horizon,`, `  inset: 7pt,`, strokeMap[v.border] || strokeMap['all lines']];
+      // Fill: header row + optional zebra.
+      const fillParts: string[] = [];
+      if (hdr) fillParts.push(`if y == 0 { ${v.headercolor}.lighten(70%) }`);
+      if (stripe) fillParts.push(`if calc.odd(y) { luma(245) }`);
+      if (fillParts.length) lines.push(`  fill: (x, y) => ${fillParts.join(' else ')},`);
+      let body = '';
+      for (let i = 0; i < r; i++) {
+        if (i === 0 && hdr) body += '  table.header(' + Array(c).fill('[*Head*]').join(', ') + '),\n';
+        else body += '  ' + Array(c).fill('[]').join(', ') + ',\n';
+      }
+      const t = `#table(\n${lines.join('\n')}\n${body})`;
       insertCode(centerWrap(t, v.center));
     }
   });
+
+  // ---- Math: conditional (cases), cancel, over/under braces ------------------
+  const insertCases = () => setInputModal({
+    title: 'Insert Conditional / Piecewise Equation',
+    fields: [
+      { key: 'name', label: 'Left-hand side', default: 'f(x)' },
+      { key: 'n', label: 'Number of cases', type: 'number', default: '2' },
+    ],
+    onSubmit: (v) => {
+      const n = Math.max(1, parseInt(v.n) || 2);
+      const rows: string[] = [];
+      for (let i = 0; i < n; i++) rows.push(i < n - 1 ? `  ${i === 0 ? 'x' : '-x'} & "if" x ${i === 0 ? '>= 0' : '< 0'}` : `  0 & "otherwise"`);
+      insertCode(`\n$ ${v.name} = cases(\n${rows.join(',\n')}\n) $\n\n`);
+    }
+  });
+
+  // A stroke string "thickness + color" (drops the parts left at their default).
+  const strokeExpr = (thickness: string, color: string, defColor = 'default') => {
+    const p: string[] = [];
+    if (thickness && thickness.trim()) p.push(thickness.trim());
+    if (color && color !== defColor) p.push(color);
+    return p.length ? p.join(' + ') : '';
+  };
+
+  const insertCancel = () => {
+    const editor = editorRef.current, model = editor?.getModel();
+    const sel = editor?.getSelection();
+    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'x';
+    setInputModal({
+      title: 'Cross Out / Strike Through',
+      fields: [
+        { key: 'target', label: 'Apply to', type: 'select', default: 'a word / text', options: ['a word / text', 'an equation term'], hint: 'Text uses strike/overlay; equation uses cancel().' },
+        { key: 'style', label: 'Style', type: 'select', default: 'line through', options: ['line through', 'diagonal', 'cross (X)'] },
+        { key: 'body', label: 'Content', default: inner },
+        { key: 'usecolor', label: 'Custom line colour', type: 'checkbox', default: 'false' },
+        { key: 'color', label: 'Line colour', type: 'color', default: 'rgb("#ef4444")' },
+        { key: 'thickness', label: 'Line thickness', default: '1pt' },
+      ],
+      submitLabel: 'Insert',
+      onSubmit: (v) => {
+        const stroke = strokeExpr(v.thickness, v.usecolor === 'true' ? v.color : 'default');
+        let code: string;
+        if (v.target.startsWith('an equation')) {
+          const args: string[] = [v.body];
+          if (v.style === 'cross (X)') args.push('cross: #true');
+          if (v.style === 'diagonal') args.push('inverted: #true');
+          if (stroke) args.push(`stroke: #(${stroke})`);
+          code = sel && model && !sel.isEmpty() ? `cancel(${args.join(', ')})` : `$ cancel(${args.join(', ')}) $`;
+        } else if (v.style === 'line through') {
+          code = `#strike(${stroke ? `stroke: ${stroke}` : ''})[${v.body}]`;
+        } else {
+          const s = stroke || '1pt';
+          const diag = `#place(top + left, line(start: (0%, 100%), end: (100%, 0%), stroke: ${s}))`;
+          const anti = `#place(top + left, line(start: (0%, 0%), end: (100%, 100%), stroke: ${s}))`;
+          code = `#box(baseline: 0pt)[${v.body}${diag}${v.style === 'cross (X)' ? anti : ''}]`;
+        }
+        replaceOrInsert(sel, editor, model, code);
+      }
+    });
+  };
+
+  // Rotate any content — equations included.
+  const insertRotate = () => {
+    const editor = editorRef.current, model = editor?.getModel();
+    const sel = editor?.getSelection();
+    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : '$ E = m c^2 $';
+    setInputModal({
+      title: 'Rotate Content / Equation',
+      fields: [
+        { key: 'body', label: 'Content', type: 'textarea', default: inner },
+        { key: 'angle', label: 'Angle (degrees, + = counter-clockwise)', default: '45' },
+        { key: 'reflow', label: 'Reserve rotated space in layout', type: 'checkbox', default: 'true' },
+      ],
+      submitLabel: 'Insert',
+      onSubmit: (v) => {
+        const a = /deg|rad/.test(v.angle) ? v.angle : `${v.angle}deg`;
+        const reflow = v.reflow === 'true' ? ', reflow: true' : '';
+        // origin: center + horizon pivots about the middle; wrapping in align keeps
+        // a (full-width) block equation tight and centred instead of swinging off-page.
+        replaceOrInsert(sel, editor, model, `\n#align(center)[#rotate(${a}, origin: center + horizon${reflow})[${v.body}]]\n\n`);
+      }
+    });
+  };
+
+  const insertBrace = () => setInputModal({
+    title: 'Insert Over / Under Brace',
+    fields: [
+      { key: 'kind', label: 'Type', type: 'select', default: 'underbrace', options: ['underbrace', 'overbrace', 'underbracket', 'overbracket'] },
+      { key: 'body', label: 'Content', default: '1 + 2 + dots.c + n' },
+      { key: 'annot', label: 'Annotation (optional)', placeholder: 'e.g. n "terms"' },
+    ],
+    onSubmit: (v) => {
+      const args = v.annot ? `${v.body}, ${v.annot}` : v.body;
+      insertCode(`\n$ ${v.kind}(${args}) $\n\n`);
+    }
+  });
+
+  // ---- Text: underline / highlight / box, with colour ------------------------
+  const insertUnderline = () => {
+    const editor = editorRef.current, model = editor?.getModel();
+    const sel = editor?.getSelection();
+    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'text';
+    setInputModal({
+      title: 'Underline (with colour)',
+      fields: [
+        { key: 'body', label: 'Text', default: inner },
+        { key: 'usecolor', label: 'Custom colour (else follows text)', type: 'checkbox', default: 'false' },
+        { key: 'color', label: 'Colour', type: 'color', default: 'rgb("#ef4444")' },
+        { key: 'thickness', label: 'Thickness', default: '1pt' },
+        { key: 'offset', label: 'Offset from text', default: '2pt' },
+        { key: 'background', label: 'Behind the text', type: 'checkbox', default: 'false' },
+      ],
+      submitLabel: 'Insert',
+      onSubmit: (v) => {
+        const a: string[] = [];
+        const strokeParts: string[] = [];
+        if (v.thickness && v.thickness !== '1pt') strokeParts.push(v.thickness);
+        if (v.usecolor === 'true') strokeParts.push(v.color);
+        if (strokeParts.length) a.push(`stroke: ${strokeParts.join(' + ')}`);
+        if (v.offset && v.offset !== '2pt') a.push(`offset: ${v.offset}`);
+        if (v.background === 'true') a.push('background: true');
+        const args = a.length ? `(${a.join(', ')})` : '';
+        replaceOrInsert(sel, editor, model, `#underline${args}[${v.body}]`);
+      }
+    });
+  };
+
+  const insertHighlight = () => {
+    const editor = editorRef.current, model = editor?.getModel();
+    const sel = editor?.getSelection();
+    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'text';
+    setInputModal({
+      title: 'Highlight / Background Colour',
+      fields: [
+        { key: 'body', label: 'Text', default: inner },
+        { key: 'color', label: 'Background colour', type: 'color', default: 'rgb("#fff59d")' },
+      ],
+      submitLabel: 'Insert',
+      onSubmit: (v) => replaceOrInsert(sel, editor, model, `#highlight(fill: ${v.color})[${v.body}]`)
+    });
+  };
+
+  const insertTextColor = () => {
+    const editor = editorRef.current, model = editor?.getModel();
+    const sel = editor?.getSelection();
+    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'text';
+    setInputModal({
+      title: 'Text Colour',
+      fields: [
+        { key: 'body', label: 'Text', default: inner },
+        { key: 'color', label: 'Colour', type: 'color', default: 'rgb("#ef4444")' },
+      ],
+      submitLabel: 'Insert',
+      onSubmit: (v) => replaceOrInsert(sel, editor, model, `#text(fill: ${v.color})[${v.body}]`)
+    });
+  };
+
+  const setSelectionFontSizePrompt = () => setInputModal({
+    title: 'Font Size',
+    fields: [{ key: 'pt', label: 'Size (pt)', type: 'number', default: '12' }],
+    submitLabel: 'Apply',
+    onSubmit: (v) => setSelectionFontSize(v.pt)
+  });
+
+  const insertBox = () => {
+    const editor = editorRef.current, model = editor?.getModel();
+    const sel = editor?.getSelection();
+    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'content';
+    setInputModal({
+      title: 'Box Selection — fill, texture, border',
+      fields: [
+        { key: 'body', label: 'Content', type: 'textarea', default: inner },
+        { key: 'kind', label: 'Layout', type: 'select', default: 'block (own line)', options: ['block (own line)', 'box (inline)'] },
+        { key: 'fill', label: 'Fill / texture', type: 'select', default: 'solid', options: ['none', 'solid', 'gradient', 'cross-hatch', 'diagonal-hatch', 'dots'] },
+        { key: 'fillcolor', label: 'Fill colour', type: 'color', default: 'rgb("#ffd54a")' },
+        { key: 'fillcolor2', label: 'Gradient second colour', type: 'color', default: 'rgb("#a855f7")', hint: 'Only used for the gradient fill.' },
+        { key: 'border', label: 'Border style', type: 'select', default: 'solid', options: ['solid', 'dashed', 'dotted', 'none'] },
+        { key: 'thickness', label: 'Border thickness', default: '1pt' },
+        { key: 'bordercolor', label: 'Border colour', type: 'color', default: 'rgb("#334155")' },
+        { key: 'radius', label: 'Corner radius', default: '4pt' },
+        { key: 'inset', label: 'Padding', default: '8pt' },
+      ],
+      submitLabel: 'Insert',
+      onSubmit: (v) => {
+        const fn = v.kind.startsWith('block') ? 'block' : 'box';
+        const a: string[] = [];
+        const th = (v.thickness || '1pt').trim();
+        if (v.fill === 'cross-hatch' || v.fill === 'diagonal-hatch') {
+          const hs = `${th} + ${v.fillcolor}`;
+          const l1 = `#place(line(start: (0%, 0%), end: (100%, 100%), stroke: ${hs}))`;
+          const l2 = `#place(line(start: (100%, 0%), end: (0%, 100%), stroke: ${hs}))`;
+          a.push(`fill: tiling(size: (6pt, 6pt))[${l1}${v.fill === 'cross-hatch' ? l2 : ''}]`);
+        } else if (v.fill === 'dots') {
+          a.push(`fill: tiling(size: (8pt, 8pt))[#place(center + horizon, circle(radius: 1.5pt, fill: ${v.fillcolor}))]`);
+        } else if (v.fill === 'gradient') {
+          a.push(`fill: gradient.linear(${v.fillcolor}, ${v.fillcolor2})`);
+        } else if (v.fill === 'solid') a.push(`fill: ${v.fillcolor}`);
+        if (v.border !== 'none') {
+          if (v.border === 'solid') a.push(`stroke: ${th} + ${v.bordercolor}`);
+          else a.push(`stroke: (paint: ${v.bordercolor}, thickness: ${th}, dash: "${v.border}")`);
+        }
+        if (v.radius && v.radius !== '0pt') a.push(`radius: ${v.radius}`);
+        if (v.inset) a.push(`inset: ${v.inset}`);
+        const code = `#${fn}(${a.join(', ')})[${v.body}]`;
+        replaceOrInsert(sel, editor, model, v.kind.startsWith('block') ? `\n${code}\n\n` : code);
+      }
+    });
+  };
+
+  // ---- Layout: alignment -----------------------------------------------------
+  const insertAlign = () => {
+    const editor = editorRef.current, model = editor?.getModel();
+    const sel = editor?.getSelection();
+    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'content';
+    setInputModal({
+      title: 'Align Content',
+      fields: [
+        { key: 'body', label: 'Content', type: 'textarea', default: inner },
+        { key: 'h', label: 'Horizontal', type: 'select', default: 'center', options: ['left', 'center', 'right', '—'] },
+        { key: 'v', label: 'Vertical', type: 'select', default: '—', options: ['—', 'top', 'horizon', 'bottom'] },
+      ],
+      submitLabel: 'Insert',
+      onSubmit: (v) => {
+        const parts = [v.h, v.v].filter(x => x && x !== '—');
+        const align = parts.length ? parts.join(' + ') : 'center';
+        replaceOrInsert(sel, editor, model, `\n#align(${align})[\n  ${v.body}\n]\n\n`);
+      }
+    });
+  };
 
   const insertImage = () => setInputModal({
     title: 'Insert Image',
@@ -927,20 +1191,14 @@ export default function App() {
     }
   });
 
-  const insertFeynman = () => setInputModal({
-    title: 'Insert Feynman Diagram (fletcher)',
-    fields: [
-      { key: 'template', label: 'Diagram', type: 'select', options: Object.keys(FEYNMAN), default: Object.keys(FEYNMAN)[0] },
-      { key: 'caption', label: 'Caption', default: 'Feynman diagram' },
-      { key: 'label', label: 'Label (optional)', placeholder: 'feyn1 → @fig:feyn1' },
-    ],
-    onSubmit: (v) => {
-      ensureRule('@preview/fletcher', '#import "@preview/fletcher:0.5.8" as fletcher: diagram, node, edge');
-      const tag = v.label ? ` <fig:${v.label}>` : '';
-      const code = FEYNMAN[v.template] || FEYNMAN[Object.keys(FEYNMAN)[0]];
-      insertCode(`\n#figure(\n  ${code},\n  caption: [${v.caption}],\n)${tag}\n\n`);
-    }
-  });
+  // Insert a commutative diagram drawn in quiver: add the fletcher import once,
+  // then drop in the exported diagram code (stripping quiver's permalink comment).
+  const insertQuiverDiagram = (code: string) => {
+    ensureRule('@preview/fletcher', '#import "@preview/fletcher:0.5.8" as fletcher: diagram, node, edge');
+    const clean = code.replace(/^\/\/[^\n]*\n/, '').trim();
+    insertCode(`\n${clean}\n\n`);
+    setShowQuiver(false);
+  };
 
   // Ensure a multi-line preamble block exists once, at the top of the document.
   const ensureSetup = (marker: string, block: string) => {
@@ -1082,6 +1340,27 @@ export default function App() {
     editor.focus();
   };
   toggleNumberingRef.current = toggleNumbering;
+
+  // Turn equation numbering on/off for the whole document by flipping the
+  // `#set math.equation(numbering: …)` rule (adds one if missing).
+  const toggleEquationNumbering = () => {
+    const editor = editorRef.current, model = editor?.getModel();
+    if (!editor || !model) return;
+    const text = model.getValue();
+    const re = /#set\s+math\.equation\(numbering:\s*("[^"]*"|none|[^)]+)\)/;
+    const m = text.match(re);
+    if (m) {
+      const off = m[1].trim() !== 'none';
+      const newLine = `#set math.equation(numbering: ${off ? 'none' : '"(1)"'})`;
+      const start = text.indexOf(m[0]);
+      const from = model.getPositionAt(start), to = model.getPositionAt(start + m[0].length);
+      editor.executeEdits('eq-num', [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column } as any, text: newLine, forceMoveMarkers: true }]);
+      setErrorLogs(null);
+    } else {
+      ensureRule('math.equation(numbering', '#set math.equation(numbering: "(1)")');
+    }
+    editor.focus();
+  };
 
   // Turn the selected lines into a bullet (-) or numbered (+) list. With no
   // selection, insert a small starter list.
@@ -1299,7 +1578,8 @@ export default function App() {
                   <div className="dropdown-item" onClick={() => { editorRef.current?.getAction('actions.find')?.run(); setActiveMenu(null); }}>Find...</div>
                   <div className="dropdown-item" onClick={() => { editorRef.current?.getAction('editor.action.startFindReplaceAction')?.run(); setActiveMenu(null); }}>Find &amp; Replace...</div>
                   <div className="dropdown-divider"></div>
-                  <div className="dropdown-item" onClick={() => { toggleNumbering(); setActiveMenu(null); }}>Toggle Numbering <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧N</span></div>
+                  <div className="dropdown-item" onClick={() => { toggleNumbering(); setActiveMenu(null); }}>Toggle Numbering (at cursor) <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧N</span></div>
+                  <div className="dropdown-item" onClick={() => { toggleEquationNumbering(); setActiveMenu(null); }}>Toggle Equation Numbering (all)</div>
                   <div className="dropdown-item" onClick={() => { setShowEditSettings(true); setActiveMenu(null); }}>Document Settings...</div>
                 </div>
               )}
@@ -1326,7 +1606,10 @@ export default function App() {
                       <div className="dropdown-item" onClick={() => { insertCode('\n$ E = m c^2 $\n\n'); setActiveMenu(null); }}>Block Equation</div>
                       <div className="dropdown-item" onClick={() => { insertMultilineEquation(); setActiveMenu(null); }}>Multiline / Aligned Equation</div>
                       <div className="dropdown-item" onClick={() => { insertNumberedEquation(); setActiveMenu(null); }}>Numbered Equation...</div>
-                      <div className="dropdown-item" onClick={() => { insertMatrix(); setActiveMenu(null); }}>Matrix...</div>
+                      <div className="dropdown-item" onClick={() => { insertMatrix(); setActiveMenu(null); }}>Matrix (delimiters, lines, colour)...</div>
+                      <div className="dropdown-item" onClick={() => { insertCases(); setActiveMenu(null); }}>Conditional / Piecewise (cases)...</div>
+                      <div className="dropdown-item" onClick={() => { insertBrace(); setActiveMenu(null); }}>Over / Under Brace...</div>
+                      <div className="dropdown-item" onClick={() => { insertCancel(); setActiveMenu(null); }}>Cancel / Strike Term...</div>
                       <div className="dropdown-item" onClick={() => { setShowSymbolPicker(true); setActiveMenu(null); }}>Math &amp; Physics Symbols...</div>
                       <div className="dropdown-item" onClick={() => { setShowSymbolDraw(true); setActiveMenu(null); }}>Draw a Symbol → Typst (experimental)...</div>
                       <div className="dropdown-item" onClick={() => { computeSelection(); setActiveMenu(null); }}>Compute Selection (simplify / solve)...</div>
@@ -1356,7 +1639,7 @@ export default function App() {
                       <div className="dropdown-item" onClick={() => { insertCetz3D(); setActiveMenu(null); }}>3D Surface (cetz)...</div>
                       <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'python', initialCode: SURFACE_3D_TEMPLATE }); setActiveMenu(null); }}>3D Surface (Python/matplotlib)...</div>
                       <div className="dropdown-item" onClick={() => { setShowPlot3D(true); setActiveMenu(null); }}>3D Plot Studio (rotate &amp; pick view)...</div>
-                      <div className="dropdown-item" onClick={() => { insertFeynman(); setActiveMenu(null); }}>Feynman Diagram (fletcher)...</div>
+                      <div className="dropdown-item" onClick={() => { setShowQuiver(true); setActiveMenu(null); }}>Commutative Diagram (quiver)...</div>
                     </div>
                   </div>
                   <div className="dropdown-item has-submenu">
@@ -1378,6 +1661,27 @@ export default function App() {
                       <div className="dropdown-item" onClick={() => { setShowBibManager(true); setActiveMenu(null); }}>Citations &amp; Bibliography (DOI/arXiv)...</div>
                     </div>
                   </div>
+                </div>
+              )}
+            </div>
+            <div className="menu-item" onClick={(e) => toggleMenu(e, 'formatting')}>
+              Formatting
+              {activeMenu === 'formatting' && (
+                <div className="dropdown">
+                  <div className="dropdown-item" onClick={() => { wrapSelection('*', '*'); setActiveMenu(null); }}>Bold</div>
+                  <div className="dropdown-item" onClick={() => { wrapSelection('_', '_'); setActiveMenu(null); }}>Italic</div>
+                  <div className="dropdown-item" onClick={() => { wrapSelection('#super[', ']'); setActiveMenu(null); }}>Superscript</div>
+                  <div className="dropdown-item" onClick={() => { wrapSelection('#sub[', ']'); setActiveMenu(null); }}>Subscript</div>
+                  <div className="dropdown-divider"></div>
+                  <div className="dropdown-item" onClick={() => { insertTextColor(); setActiveMenu(null); }}>Text Colour...</div>
+                  <div className="dropdown-item" onClick={() => { insertUnderline(); setActiveMenu(null); }}>Underline (colour, background)...</div>
+                  <div className="dropdown-item" onClick={() => { insertHighlight(); setActiveMenu(null); }}>Highlight / Background Colour...</div>
+                  <div className="dropdown-item" onClick={() => { insertCancel(); setActiveMenu(null); }}>Cross Out / Strike Through...</div>
+                  <div className="dropdown-divider"></div>
+                  <div className="dropdown-item" onClick={() => { insertBox(); setActiveMenu(null); }}>Box Selection (fill, border, texture)...</div>
+                  <div className="dropdown-item" onClick={() => { setSelectionFontSizePrompt(); setActiveMenu(null); }}>Font Size...</div>
+                  <div className="dropdown-item" onClick={() => { insertAlign(); setActiveMenu(null); }}>Align Content...</div>
+                  <div className="dropdown-item" onClick={() => { insertRotate(); setActiveMenu(null); }}>Rotate (content or equation)...</div>
                 </div>
               )}
             </div>
@@ -1594,8 +1898,36 @@ export default function App() {
                   // Ensure our custom themes are applied on the very first paint
                   // (otherwise the editor briefly renders in the default light theme).
                   monacoInstance.editor.setTheme(theme);
+                  // Force-disable mouse hover (the options prop alone isn't always
+                  // honoured); docs are on right-click instead.
+                  e.updateOptions({ hover: { enabled: false } });
                   const m = e.getModel();
                   if (m) { const last = m.getLineCount(); e.setPosition({ lineNumber: last, column: m.getLineMaxColumn(last) }); }
+                  // Right-click (or ⌘⇧D) → show Typst documentation for the symbol
+                  // under the cursor in a small popup near the cursor.
+                  e.addAction({
+                    id: 'typst.showDocs',
+                    label: 'Show Typst Documentation',
+                    contextMenuGroupId: 'navigation',
+                    contextMenuOrder: 0.5,
+                    keybindings: [monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyMod.Shift | monacoInstance.KeyCode.KeyD],
+                    run: (ed: any) => {
+                      const pos = ed.getPosition(); const model = ed.getModel();
+                      if (!pos || !model) return;
+                      const w = model.getWordAtPosition(pos);
+                      if (!w) { setDocPopup(null); return; }
+                      const line = model.getLineContent(pos.lineNumber);
+                      let s = w.startColumn - 1, en = w.endColumn - 1;
+                      while (s > 0 && /[\w.-]/.test(line[s - 1])) s--;
+                      while (en < line.length && /[\w.-]/.test(line[en])) en++;
+                      const full = line.slice(s, en).replace(/^[.-]+|[.-]+$/g, '');
+                      const info = lookupTypstDoc(w.word, full);
+                      if (!info) { setDocPopup({ notFound: w.word } as any); return; }
+                      const vp = ed.getScrolledVisiblePosition(pos);
+                      const rect = ed.getDomNode()?.getBoundingClientRect();
+                      setDocPopup({ info, x: (rect?.left || 0) + (vp?.left || 0), y: (rect?.top || 0) + (vp?.top || 0) + 22 });
+                    },
+                  });
                 }}
                 options={{
                   automaticLayout: true,
@@ -1610,7 +1942,10 @@ export default function App() {
                   padding: { top: 16, bottom: 16 },
                   autoClosingBrackets: 'always',
                   autoClosingQuotes: 'always',
-                  bracketPairColorization: { enabled: true }
+                  bracketPairColorization: { enabled: true },
+                  // Docs are shown on right-click ("Show Typst Documentation"),
+                  // not on mouse-hover, so the hover popup is disabled.
+                  hover: { enabled: false },
                 }}
               />
             ) : (
@@ -1650,10 +1985,31 @@ export default function App() {
       {showEditSettings && <EditSettings onClose={() => setShowEditSettings(false)} editorRef={editorRef} monaco={monaco} />}
       {showDriveSync && <DriveSyncModal onClose={() => setShowDriveSync(false)} projectName={projectName} />}
       {showAppSettings && <AppSettingsModal onClose={() => setShowAppSettings(false)} />}
+      {showQuiver && <QuiverDiagram onClose={() => setShowQuiver(false)} onInsert={insertQuiverDiagram} />}
+      {docPopup && (
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 998 }} onClick={() => setDocPopup(null)} onContextMenu={(e) => { e.preventDefault(); setDocPopup(null); }} />
+          <div style={{ position: 'fixed', left: Math.min(('x' in docPopup ? docPopup.x : 0), window.innerWidth - 380), top: 'y' in docPopup ? docPopup.y : 0, zIndex: 999, width: 360, maxHeight: 360, overflow: 'auto', background: 'var(--panel-bg, #1e293b)', color: 'var(--text-color, #e2e8f0)', border: '1px solid var(--border-color, #334155)', borderRadius: 8, boxShadow: '0 8px 30px rgba(0,0,0,0.5)', padding: 14, fontSize: 13 }} onClick={(e) => e.stopPropagation()}>
+            {'notFound' in docPopup ? (
+              <div style={{ opacity: 0.8 }}>No Typst documentation found for <code>{docPopup.notFound}</code>. Try right-clicking directly on a function name (e.g. <code>figure</code>, <code>table</code>, <code>vec</code>).</div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
+                  <strong style={{ fontSize: 15 }}>{docPopup.info.key}</strong>
+                  {docPopup.info.detail && <span style={{ fontSize: 11, opacity: 0.7, border: '1px solid var(--border-color, #334155)', borderRadius: 4, padding: '1px 6px' }}>{docPopup.info.detail}</span>}
+                </div>
+                {docPopup.info.doc && <div style={{ lineHeight: 1.5, marginBottom: 8 }}>{docPopup.info.doc}</div>}
+                <pre style={{ background: 'var(--bg-color, #0f172a)', borderRadius: 6, padding: '8px 10px', margin: '0 0 10px', overflowX: 'auto', fontSize: 12 }}><code>#{docPopup.info.usage}</code></pre>
+                <a href={docPopup.info.url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent, #a78bfa)', fontSize: 12 }}>Open Typst documentation ↗</a>
+              </>
+            )}
+          </div>
+        </>
+      )}
       {inputModal && <InputModal {...inputModal} onClose={() => setInputModal(null)} />}
       {codeRunner && <CodeRunnerModal {...codeRunner} onClose={() => setCodeRunner(null)} onInsert={(code) => { insertCode(code); setCodeRunner(null); }} onInsertEquation={(latex, codeBlock) => { insertEquationFromLatex(latex, codeBlock); setCodeRunner(null); }} onChanged={fetchTree} />}
       {showSaveAs && activeTab && <SaveAsModal onClose={() => setShowSaveAs(false)} fileName={activeTabPath} content={activeTab.content} pdfUrl={pdfUrl} projectName={projectName} mainFile={currentMain} />}
-      {showPlot3D && <Plot3DStudio onClose={() => setShowPlot3D(false)} onInsert={(code) => { insertCode(code); setShowPlot3D(false); fetchTree(); }} />}
+      {showPlot3D && <Suspense fallback={null}><Plot3DStudio onClose={() => setShowPlot3D(false)} onInsert={(code) => { insertCode(code); setShowPlot3D(false); fetchTree(); }} /></Suspense>}
       {showSymbolDraw && <SymbolDraw onClose={() => setShowSymbolDraw(false)} onInsert={(name) => { insertCode(name + ' '); setShowSymbolDraw(false); }} />}
       {showRefManager && activeTab && <RefManager content={activeTab.content} onClose={() => setShowRefManager(false)} onJump={jumpToLine} onInsertRef={(name) => insertCode(`@${name}`)} />}
       {showBibManager && <BibManager onClose={() => setShowBibManager(false)} onCite={(key) => { insertCode(`@${key}`); ensureBibliography(); }} onEnsureBib={ensureBibliography} onChanged={fetchTree} />}

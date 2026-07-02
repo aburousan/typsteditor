@@ -3,11 +3,12 @@ import { useEffect, useRef, useState } from 'react';
 // ---------------------------------------------------------------------------
 // Draw a maths/physics symbol with the mouse/trackpad and get the Typst code.
 //
-// Fully offline, no trained model: every symbol's Unicode glyph is rendered to
-// an off-screen canvas; both the glyph and the drawn strokes are reduced to a
-// centred, aspect-preserved, Gaussian-blurred 32×32 "ink map" and compared by
-// cosine similarity. Blurring bridges the gap between a thin hand-drawn stroke
-// and a solid glyph, so distinctive shapes (∫ ∑ √ α π → …) match well.
+// Fully offline, no trained model. Each glyph is rendered and reduced two ways:
+// (1) a blurred 32×32 ink map (area overlap), and (2) its 1-pixel *skeleton*
+// (Zhang–Suen thinning) as a normalized point cloud. A drawing is matched with a
+// blend of cosine similarity on (1) and the $P greedy-cloud recognizer on (2) —
+// the skeleton/point-cloud path is the same idea Detexify uses, matching the
+// centerline of your strokes to the centerline of the glyph.
 // ---------------------------------------------------------------------------
 
 type Pt = { x: number; y: number };
@@ -101,7 +102,105 @@ function toVector(src: HTMLCanvasElement): Float32Array {
 
 const cosine = (a: Float32Array, b: Float32Array) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
 
-type Template = { name: string; ch: string; vec: Float32Array };
+// --- Skeleton + $P point-cloud matching (detexify-style stroke matching) -----
+// The drawn strokes and each glyph's *centerline* (skeleton) are reduced to
+// normalized point clouds and compared with the $P greedy-cloud recognizer,
+// which is start/direction-invariant — so it matches a hand-drawn ∫/α/→ to the
+// glyph's skeleton far better than area-overlap alone.
+const CLOUD_N = 32;
+const pdist = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y);
+
+function normalizeCloud(pts: Pt[]): Pt[] {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of pts) { minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y); }
+  const s = Math.max(maxX - minX, maxY - minY) || 1;
+  let cx = 0, cy = 0;
+  const out = pts.map(p => { const q = { x: (p.x - minX) / s, y: (p.y - minY) / s }; cx += q.x; cy += q.y; return q; });
+  cx /= out.length || 1; cy /= out.length || 1;
+  return out.map(p => ({ x: p.x - cx, y: p.y - cy }));
+}
+
+// Farthest-point sample to exactly n points for even coverage.
+function samplePoints(pts: Pt[], n: number): Pt[] {
+  if (pts.length === 0) return [];
+  if (pts.length <= n) { const o = pts.slice(); while (o.length < n) o.push(pts[o.length % pts.length]); return o; }
+  const chosen = [pts[0]]; const d = pts.map(p => pdist(p, pts[0]));
+  while (chosen.length < n) {
+    let idx = 0, best = -1;
+    for (let i = 0; i < pts.length; i++) if (d[i] > best) { best = d[i]; idx = i; }
+    chosen.push(pts[idx]);
+    for (let i = 0; i < pts.length; i++) { const dd = pdist(pts[i], pts[idx]); if (dd < d[i]) d[i] = dd; }
+  }
+  return chosen;
+}
+
+function cloudDistance(pts: Pt[], tmpl: Pt[], start: number): number {
+  const n = pts.length; const matched = new Array(n).fill(false); let sum = 0, i = start;
+  do {
+    let min = Infinity, index = -1;
+    for (let j = 0; j < n; j++) if (!matched[j]) { const dd = pdist(pts[i], tmpl[j]); if (dd < min) { min = dd; index = j; } }
+    if (index >= 0) matched[index] = true;
+    sum += (1 - ((i - start + n) % n) / n) * min;
+    i = (i + 1) % n;
+  } while (i !== start);
+  return sum;
+}
+function greedyMatch(pts: Pt[], tmpl: Pt[]): number {
+  const n = pts.length; const step = Math.max(1, Math.floor(Math.sqrt(n))); let min = Infinity;
+  for (let i = 0; i < n; i += step) min = Math.min(min, cloudDistance(pts, tmpl, i), cloudDistance(tmpl, pts, i));
+  return min;
+}
+
+// Zhang–Suen thinning to a 1-pixel skeleton, in place.
+function thin(bin: Uint8Array, W: number, H: number) {
+  const idx = (x: number, y: number) => y * W + x;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let step = 0; step < 2; step++) {
+      const remove: number[] = [];
+      for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+        if (!bin[idx(x, y)]) continue;
+        const p = [bin[idx(x, y - 1)], bin[idx(x + 1, y - 1)], bin[idx(x + 1, y)], bin[idx(x + 1, y + 1)], bin[idx(x, y + 1)], bin[idx(x - 1, y + 1)], bin[idx(x - 1, y)], bin[idx(x - 1, y - 1)]];
+        const B = p[0] + p[1] + p[2] + p[3] + p[4] + p[5] + p[6] + p[7];
+        if (B < 2 || B > 6) continue;
+        let A = 0; for (let k = 0; k < 8; k++) if (p[k] === 0 && p[(k + 1) % 8] === 1) A++;
+        if (A !== 1) continue;
+        if (step === 0) { if (p[0] * p[2] * p[4] !== 0 || p[2] * p[4] * p[6] !== 0) continue; }
+        else { if (p[0] * p[2] * p[6] !== 0 || p[0] * p[4] * p[6] !== 0) continue; }
+        remove.push(idx(x, y));
+      }
+      if (remove.length) { changed = true; for (const i of remove) bin[i] = 0; }
+    }
+  }
+}
+
+// Render a glyph (or reuse a stroke canvas), fit its ink to an S×S box, threshold,
+// thin to a skeleton, and return the skeleton pixel points.
+function skeletonPoints(src: HTMLCanvasElement): Pt[] {
+  const S = 46;
+  const sctx = src.getContext('2d', { willReadFrequently: true })!;
+  const W = src.width, H = src.height;
+  const d = sctx.getImageData(0, 0, W, H).data;
+  let minX = W, minY = H, maxX = -1, maxY = -1;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (d[(y * W + x) * 4 + 3] > 40) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+  if (maxX < minX) return [];
+  const g = document.createElement('canvas'); g.width = S; g.height = S;
+  const gctx = g.getContext('2d', { willReadFrequently: true })!;
+  const bw = maxX - minX + 1, bh = maxY - minY + 1;
+  const sc = (S - 6) / Math.max(bw, bh), dw = bw * sc, dh = bh * sc;
+  gctx.imageSmoothingEnabled = true;
+  gctx.drawImage(src, minX, minY, bw, bh, (S - dw) / 2, (S - dh) / 2, dw, dh);
+  const gd = gctx.getImageData(0, 0, S, S).data;
+  const bin = new Uint8Array(S * S);
+  for (let i = 0; i < S * S; i++) bin[i] = gd[i * 4 + 3] > 60 ? 1 : 0;
+  thin(bin, S, S);
+  const pts: Pt[] = [];
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) if (bin[y * S + x]) pts.push({ x, y });
+  return pts;
+}
+
+type Template = { name: string; ch: string; vec: Float32Array; cloud: Pt[] };
 
 function buildTemplates(): Template[] {
   const S = 128;
@@ -116,7 +215,9 @@ function buildTemplates(): Template[] {
     const d = ctx.getImageData(0, 0, S, S).data;
     let ink = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 40) ink++;
     if (ink < 20) continue; // glyph unsupported by available fonts
-    out.push({ name: sym.name, ch: sym.ch, vec: toVector(cv) });
+    const sk = skeletonPoints(cv);
+    if (sk.length < 5) continue;
+    out.push({ name: sym.name, ch: sym.ch, vec: toVector(cv), cloud: samplePoints(normalizeCloud(sk), CLOUD_N) });
   }
   return out;
 }
@@ -197,8 +298,15 @@ export default function SymbolDraw({ onClose, onInsert }: { onClose: () => void;
     if (!templates) return;
     const gc = gestureCanvas(strokesRef.current);
     if (!gc) { setResults([]); return; }
+    // Bitmap signal (area overlap) + skeleton $P signal (stroke shape).
     const v = toVector(gc);
-    const scored = templates.map(t => ({ name: t.name, ch: t.ch, score: cosine(v, t.vec) }));
+    const raw = strokesRef.current.flat();
+    const gcloud = raw.length >= CLOUD_N ? samplePoints(normalizeCloud(raw), CLOUD_N) : samplePoints(normalizeCloud(skeletonPoints(gc)), CLOUD_N);
+    const scored = templates.map(t => {
+      const simB = cosine(v, t.vec);                 // 0..1, higher better
+      const simP = 1 / (1 + greedyMatch(gcloud, t.cloud)); // ~0..1, higher better
+      return { name: t.name, ch: t.ch, score: 0.55 * simP + 0.45 * simB };
+    });
     scored.sort((a, b) => b.score - a.score);
     setResults(scored.slice(0, 10));
   };

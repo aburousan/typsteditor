@@ -3,6 +3,52 @@ import { typstCompletions } from './typstCompletions';
 let themesDefined = false;
 let providersRegistered = false;
 
+// Documentation index (built in setupTypstLanguage from the completion data).
+let DOCS: Map<string, { doc: string; detail: string; insert: string; url?: string }> | null = null;
+const DOCS_SECTION: Record<string, string> = {
+  Layout: 'layout', Model: 'model', Text: 'text', Math: 'math', Visualize: 'visualize',
+  Foundations: 'foundations', Introspection: 'introspection', 'Data Loading': 'data-loading',
+  Symbols: 'symbols', PDF: 'pdf',
+};
+
+// Docs for the language keywords / rules, which aren't in the completion data.
+const KEYWORD_DOCS: { key: string; detail: string; insert: string; doc: string; url: string }[] = [
+  { key: 'set', detail: 'Keyword', insert: 'set text(size: 12pt)', doc: 'Set rule — changes the default properties of an element for the rest of the current scope. e.g. #set text(fill: blue).', url: 'https://typst.app/docs/reference/styling/#set-rules' },
+  { key: 'show', detail: 'Keyword', insert: 'show heading: set text(navy)', doc: 'Show rule — redefines how elements are displayed, either wholesale or with a transformation function.', url: 'https://typst.app/docs/reference/styling/#show-rules' },
+  { key: 'let', detail: 'Keyword', insert: 'let name = value', doc: 'Binds a variable, or defines a function with #let f(x) = ....', url: 'https://typst.app/docs/reference/scripting/#bindings' },
+  { key: 'import', detail: 'Keyword', insert: 'import "@preview/pkg:1.0.0": *', doc: 'Imports definitions from another file or a package.', url: 'https://typst.app/docs/reference/scripting/#modules' },
+  { key: 'include', detail: 'Keyword', insert: 'include "chapter.typ"', doc: 'Includes the evaluated content of another Typst file at this position.', url: 'https://typst.app/docs/reference/scripting/#modules' },
+  { key: 'context', detail: 'Keyword', insert: 'context counter(page).get()', doc: 'Enters a context in which location-dependent values (counters, state, measurements) can be read.', url: 'https://typst.app/docs/reference/context/' },
+  { key: 'if', detail: 'Keyword', insert: 'if condition [ .. ] else [ .. ]', doc: 'Conditionally includes content or evaluates code depending on a boolean condition.', url: 'https://typst.app/docs/reference/scripting/#conditionals' },
+  { key: 'else', detail: 'Keyword', insert: 'else [ .. ]', doc: 'The alternative branch of an if statement.', url: 'https://typst.app/docs/reference/scripting/#conditionals' },
+  { key: 'for', detail: 'Keyword', insert: 'for item in collection [ .. ]', doc: 'Loops over the items of a collection (array, dictionary, string, …).', url: 'https://typst.app/docs/reference/scripting/#loops' },
+  { key: 'while', detail: 'Keyword', insert: 'while condition [ .. ]', doc: 'Repeats content or code while a condition stays true.', url: 'https://typst.app/docs/reference/scripting/#loops' },
+  { key: 'break', detail: 'Keyword', insert: 'break', doc: 'Exits the current loop early.', url: 'https://typst.app/docs/reference/scripting/#loops' },
+  { key: 'continue', detail: 'Keyword', insert: 'continue', doc: 'Skips to the next iteration of the current loop.', url: 'https://typst.app/docs/reference/scripting/#loops' },
+  { key: 'return', detail: 'Keyword', insert: 'return value', doc: 'Returns a value from a function.', url: 'https://typst.app/docs/reference/scripting/#functions' },
+];
+
+export type TypstDoc = { key: string; doc: string; detail: string; usage: string; url: string };
+
+// Look up docs for an identifier (plain "block" or dotted "math.equation"),
+// returning its description, category, a clean usage line, and the docs URL.
+export function lookupTypstDoc(word: string, full: string): TypstDoc | null {
+  if (!DOCS) return null;
+  let key = [full, word, `math.${word}`].find(k => DOCS!.has(k));
+  if (!key) for (const k of DOCS.keys()) if (k.endsWith('.' + word)) { key = k; break; }
+  if (!key) return null;
+  const entry = DOCS.get(key)!;
+  const base = key.split('.')[0];
+  const section = DOCS_SECTION[entry.detail];
+  const url = entry.url
+    ? entry.url
+    : section
+      ? `https://typst.app/docs/reference/${section}/${base}/`
+      : `https://typst.app/docs/search/?q=${encodeURIComponent(key)}`;
+  const usage = entry.insert.replace(/\$\{\d+:?([^}]*)\}/g, '$1').replace(/\$\d+/g, '');
+  return { key, doc: entry.doc, detail: entry.detail, usage, url };
+}
+
 // Boilerplate for the common element/layout/model functions: completing one
 // drops in its key arguments as tab-stops (${1}, ${2}, …) so you're not left
 // staring at empty parentheses. Only the functions people actually type by hand
@@ -255,6 +301,47 @@ export function setupTypstLanguage(monacoInstance: any) {
       return { suggestions };
     }
   });
+
+  // Control-flow / code-mode snippets (if / else / for / while / let / show / …)
+  // with ready-made boilerplate, so writing conditional and loop logic is a tab
+  // away instead of remembered.
+  const KW = monacoInstance.languages.CompletionItemKind.Snippet;
+  // In markup (writing a document with #if/#for/…), the body is a *content*
+  // block [ … ] — a code block { … } would treat plain words as variables and
+  // error. So these use [ … ]; use { … } yourself for pure computation.
+  const CONTROL: { label: string; insertText: string; documentation: string }[] = [
+    { label: 'if', insertText: 'if ${1:condition} [\n\t${2:body}\n]', documentation: 'Conditional content.' },
+    { label: 'if else', insertText: 'if ${1:condition} [\n\t${2}\n] else [\n\t${3}\n]', documentation: 'If / else content.' },
+    { label: 'if elseif', insertText: 'if ${1:cond1} [\n\t${2}\n] else if ${3:cond2} [\n\t${4}\n] else [\n\t${5}\n]', documentation: 'If / else-if / else chain.' },
+    { label: 'else', insertText: 'else [\n\t${1:body}\n]', documentation: 'Else content.' },
+    { label: 'for', insertText: 'for ${1:item} in ${2:collection} [\n\t${3:body}\n]', documentation: 'For loop over a collection.' },
+    { label: 'for range', insertText: 'for ${1:i} in range(${2:n}) [\n\t${3:body}\n]', documentation: 'For loop over a range.' },
+    { label: 'while', insertText: 'while ${1:condition} [\n\t${2:body}\n]', documentation: 'While loop.' },
+    { label: 'let', insertText: 'let ${1:name} = ${2:value}', documentation: 'Bind a variable.' },
+    { label: 'let function', insertText: 'let ${1:name}(${2:args}) = [\n\t${3:body}\n]', documentation: 'Define a function returning content.' },
+    { label: 'set', insertText: 'set ${1:element}(${2:args})', documentation: 'Set rule.' },
+    { label: 'set if', insertText: 'set ${1:element}(${2:args}) if ${3:condition}', documentation: 'Conditional set rule.' },
+    { label: 'show', insertText: 'show ${1:selector}: ${2:it} => ${3:transform}', documentation: 'Show rule.' },
+    { label: 'context', insertText: 'context ${1:expression}', documentation: 'Access context-dependent values.' },
+    { label: 'import', insertText: 'import "${1:@preview/package:1.0.0}": ${2:*}', documentation: 'Import a module/package.' },
+  ];
+  monacoInstance.languages.registerCompletionItemProvider(languageId, {
+    provideCompletionItems: () => ({
+      suggestions: CONTROL.map(c => ({ ...c, kind: KW, insertTextRules: SNIPPET_RULE, detail: 'Control flow' })),
+    }),
+  });
+
+  // Documentation lookup: index the completion data so the editor can show a
+  // function/element's description, category, usage and docs link on right-click
+  // (see lookupTypstDoc / the "Show Typst Documentation" action in App.tsx).
+  DOCS = new Map();
+  for (const c of typstCompletions(monacoInstance)) {
+    const label = String(c.label || '');
+    if (!label || DOCS.has(label)) continue;
+    const doc = typeof c.documentation === 'string' ? c.documentation : ((c.documentation as any)?.value || '');
+    DOCS.set(label, { doc, detail: c.detail || '', insert: String(c.insertText || label) });
+  }
+  for (const k of KEYWORD_DOCS) DOCS.set(k.key, { doc: k.doc, detail: k.detail, insert: k.insert, url: k.url });
 
   // Cross-reference autocomplete: when typing `@`, suggest labels (`<...>`)
   // that already exist in the document.

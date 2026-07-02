@@ -5,6 +5,12 @@ import { writeFileSync, readFileSync, rmSync, existsSync, mkdirSync, readdirSync
 import { join, relative, dirname, resolve, sep } from 'path';
 import { tmpdir, homedir } from 'os';
 
+// Safety net: never let a stray async error (e.g. an unhandled child-process
+// spawn failure) take down the whole backend — that would leave the UI stuck on
+// "No preview available" with a dead server. Log and keep running instead.
+process.on('uncaughtException', (err) => { console.error('[typst-editor] uncaught:', err && err.message ? err.message : err); });
+process.on('unhandledRejection', (err) => { console.error('[typst-editor] unhandled rejection:', err && err.message ? err.message : err); });
+
 const app = express();
 // Only allow the local dev UI to talk to this server.
 app.use(cors({ origin: [/^http:\/\/localhost:\d+$/, /^http:\/\/127\.0\.0\.1:\d+$/] }));
@@ -175,11 +181,23 @@ app.post('/compile', (req, res) => {
   
   const typstProcess = spawn('typst', ['compile', mainPath, outputPath], { cwd: WORKSPACE_DIR });
   let stderr = '';
+  let responded = false;
   typstProcess.stderr.on('data', data => { stderr += data.toString(); });
-  
+
+  // If `typst` isn't installed / not on PATH, spawn emits 'error' (ENOENT) — not
+  // 'close'. Without this handler the unhandled error would crash the backend,
+  // leaving the user with a silent "No preview available".
+  typstProcess.on('error', err => {
+    if (responded) return; responded = true;
+    res.status(500).json({ error: err.code === 'ENOENT'
+      ? 'Typst compiler not found. Install the Typst CLI (macOS: `brew install typst`; Linux: a release binary from github.com/typst/typst or `cargo install typst-cli`) so that `typst --version` works, then restart the editor.'
+      : `Could not run typst: ${err.message}` });
+  });
+
   typstProcess.on('close', code => {
+    if (responded) return; responded = true;
     if (code !== 0) {
-      res.status(400).json({ error: stderr });
+      res.status(400).json({ error: stderr || `typst exited with code ${code}` });
     } else {
       res.sendFile(outputPath);
     }
@@ -419,7 +437,8 @@ app.post('/export', (req, res) => {
       const proc = spawn('typst', args, { cwd: WORKSPACE_DIR });
       let err = '';
       proc.stderr.on('data', d => { err += d.toString(); });
-      proc.on('close', code => code === 0 ? res.json({ ok: true, target }) : res.status(400).json({ error: err || 'Compilation failed.' }));
+      proc.on('error', e => { if (!res.headersSent) res.status(500).json({ error: e.code === 'ENOENT' ? 'Typst compiler not found — install the Typst CLI so `typst --version` works.' : String(e.message) }); });
+      proc.on('close', code => { if (res.headersSent) return; code === 0 ? res.json({ ok: true, target }) : res.status(400).json({ error: err || 'Compilation failed.' }); });
       return;
     }
     res.status(400).json({ error: 'Unknown format.' });
@@ -436,7 +455,8 @@ app.get('/compile/html', (req, res) => {
   const proc = spawn('typst', ['compile', '--format', 'html', '--features', 'html', mainPath, out], { cwd: WORKSPACE_DIR });
   let err = '';
   proc.stderr.on('data', d => { err += d.toString(); });
-  proc.on('close', code => code === 0 ? res.sendFile(out, { dotfiles: 'allow' }) : res.status(400).json({ error: err || 'HTML export failed.' }));
+  proc.on('error', e => { if (!res.headersSent) res.status(500).json({ error: e.code === 'ENOENT' ? 'Typst compiler not found — install the Typst CLI so `typst --version` works.' : String(e.message) }); });
+  proc.on('close', code => { if (res.headersSent) return; code === 0 ? res.sendFile(out, { dotfiles: 'allow' }) : res.status(400).json({ error: err || 'HTML export failed.' }); });
 });
 
 // ---------------------------------------------------------------------------

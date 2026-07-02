@@ -31,3 +31,8 @@ workspace/sandbox/
 *.run.*
 workspace/.previews/
 release/
+
+# Personal documents living in the local workspace (only the shipped demo
+# files example.typ/showcase.typ/main.typ/refs.bib are tracked)
+workspace/*.pdf
+workspace/images/

@@ -21,6 +21,10 @@ export default function Plot3DStudio({ onClose, onInsert }: { onClose: () => voi
   const [range, setRange] = useState('5');
   const [err, setErr] = useState('');
   const [saving, setSaving] = useState(false);
+  // The scene is built once (empty-deps effect), so `build` would otherwise
+  // close over the initial expr/range forever. Read the live values via refs.
+  const exprRef = useRef(expr);
+  const rangeRef = useRef(range);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -51,10 +55,10 @@ export default function Plot3DStudio({ onClose, onInsert }: { onClose: () => voi
     let mesh: THREE.Mesh | null = null;
     const build = () => {
       let f: (x: number, y: number) => number;
-      try { f = new Function('x', 'y', 'return (' + toJs(expr) + ')') as any; if (!isFinite(f(0.3, 0.4))) throw 0; setErr(''); }
+      try { f = new Function('x', 'y', 'return (' + toJs(exprRef.current) + ')') as any; if (!isFinite(f(0.3, 0.4))) throw 0; setErr(''); }
       catch { setErr('Invalid expression — use X, Y and np.* (e.g. np.sin(X)*np.cos(Y)).'); return; }
       if (mesh) { scene.remove(mesh); (mesh.geometry as THREE.BufferGeometry).dispose(); }
-      const R = Math.abs(parseFloat(range)) || 5, N = 60;
+      const R = Math.abs(parseFloat(rangeRef.current)) || 5, N = 60;
       const geo = new THREE.PlaneGeometry(2 * R, 2 * R, N, N);
       const pos = geo.attributes.position;
       const zs: number[] = []; let zmin = Infinity, zmax = -Infinity;
@@ -86,7 +90,7 @@ export default function Plot3DStudio({ onClose, onInsert }: { onClose: () => voi
     return () => { cancelAnimationFrame(raf); ro.disconnect(); controls.dispose(); renderer.dispose(); try { mount.removeChild(renderer.domElement); } catch {} };
   }, []);
 
-  useEffect(() => { rebuildRef.current(); }, [expr, range]);
+  useEffect(() => { exprRef.current = expr; rangeRef.current = range; rebuildRef.current(); }, [expr, range]);
 
   // Capture exactly what's on screen (WYSIWYG) at higher resolution, save it into
   // the workspace images/ folder, and insert a figure referencing it. No Python.
