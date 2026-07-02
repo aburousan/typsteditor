@@ -131,8 +131,18 @@ Your documents live in `~/Documents/TypstEditor`. The desktop app still needs th
 **Typst CLI** on your `PATH` (and Python/Julia/Wolfram for the optional code
 features) — those aren't bundled.
 
-> **macOS note:** the app is ad-hoc signed but not notarised, so the first launch
-> needs a right-click → **Open** (or `xattr -cr "/Applications/Typst Editor.app"`).
+> **macOS note:** the app is not notarised (no paid Apple developer account), so
+> macOS warns on first launch. It's the standard warning for any indie app
+> distributed outside the App Store — the code is open, so you can audit or
+> build it yourself. To open:
+> - **macOS 15 (Sequoia) and newer:** double-click once (it will refuse), then
+>   go to **System Settings → Privacy & Security**, scroll down, and click
+>   **Open Anyway** next to Typst Editor.
+> - **macOS 14 and older:** right-click the app → **Open** → **Open**.
+> - **Terminal alternative** (any version): `xattr -cr "/Applications/Typst Editor.app"`
+>   removes the quarantine flag, then it opens normally.
+>
+> This only happens once; afterwards the app opens like any other.
 
 ### Windows
 
