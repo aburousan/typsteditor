@@ -15,6 +15,14 @@ result straight into the document.
 
 ![Live preview](docs/gifs/live-preview.gif)
 
+**Draw a commutative diagram visually ([quiver](https://github.com/varkor/quiver), bundled) — it lands in your document as editable `fletcher` code:**
+
+![Commutative diagram with quiver](docs/gifs/quiver-diagram.gif)
+
+**Colour anything with the draggable colour grid (Formatting menu):**
+
+![Text colour picker](docs/gifs/text-colour.gif)
+
 **Run Python/Julia/Wolfram and drop the result in as a typeset equation:**
 
 ![Run code → equation](docs/gifs/run-code-equation.gif)
