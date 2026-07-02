@@ -63,6 +63,19 @@ app.get('/workspace/root', (req, res) => {
   res.json({ root: WORKSPACE_DIR });
 });
 
+// Empty the current workspace (used by the browser "Open Folder", which imports
+// the chosen folder's files as the new project). Removes everything at the top
+// level; the folder itself stays.
+app.post('/workspace/clear', (req, res) => {
+  try {
+    for (const item of readdirSync(WORKSPACE_DIR)) {
+      if (item === '.git') continue;
+      rmSync(join(WORKSPACE_DIR, item), { recursive: true, force: true });
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 app.post('/workspace/root', (req, res) => {
   let { path } = req.body || {};
   if (typeof path !== 'string' || !path.trim()) return res.status(400).json({ error: 'Folder path required.' });

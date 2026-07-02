@@ -185,7 +185,10 @@ export function setupTypstLanguage(monacoInstance: any) {
 
   monacoInstance.languages.registerCompletionItemProvider(languageId, {
     provideCompletionItems: () => {
-      const suggestions = typstCompletions(monacoInstance);
+      // Hide Typst's experimental HTML-export elements (html.h1, html.div, …):
+      // they're irrelevant when writing PDFs and just clutter suggestions (e.g.
+      // "#h3" was offering an HTML element).
+      const suggestions = typstCompletions(monacoInstance).filter((s: any) => s.detail !== 'HTML');
       return { suggestions };
     }
   });

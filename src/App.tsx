@@ -463,38 +463,74 @@ export default function App() {
     return null;
   };
 
-  // "Open Folder" (VS Code style): repoint the whole app at a folder on disk.
-  // Nothing is uploaded, copied or deleted — the current workspace is just
-  // swapped out for the chosen one (the old files stay where they are).
+  // After the workspace contents change (root switch or import), reload the tree,
+  // reset the editor, name the project after the folder, and open a starter file.
+  const loadWorkspace = async (projectDisplayName?: string) => {
+    setTabs([]);
+    setActiveTabPath('');
+    setHistory([]);
+    setErrorLogs(null);
+    setPdfUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null; });
+    if (projectDisplayName) setProjectName(projectDisplayName);
+    const tree: FileNode[] = await (await fetch('http://localhost:3001/workspace')).json();
+    setFileTree(tree);
+    // Open a starter file directly (don't route through openFile, whose closure
+    // still holds the pre-switch tab list).
+    const first = findFirstTyp(tree);
+    if (first) {
+      const r = await fetch(`http://localhost:3001/workspace/file?path=${encodeURIComponent(first)}`);
+      if (r.ok) { const content = await r.text(); setTabs([{ path: first, content, isDirty: false }]); setActiveTabPath(first); }
+    }
+  };
+
+  // "Open Folder" (VS Code style): make the chosen folder the project.
+  // Desktop app → repoints the backend at that folder on disk (nothing copied).
+  // Browser → uses the native folder picker and imports the folder as the new
+  // workspace (browsers don't expose the real path), replacing the current files.
   const openFolderAsRoot = async () => {
-    let folder: string | null = null;
     const desktop = (window as any).desktop;
     if (desktop?.pickFolder) {
-      folder = await desktop.pickFolder();               // native dialog in the desktop app
-    } else {
-      folder = prompt('Open folder — paste the absolute path to the folder to use as the workspace.\n(In Finder: right-click the folder, hold Option, choose “Copy … as Pathname”.)', '');
+      const folder: string | null = await desktop.pickFolder();
+      if (!folder || !folder.trim()) return;
+      try {
+        const res = await fetch('http://localhost:3001/workspace/root', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folder }) });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { alert(data.error || 'Could not open that folder.'); return; }
+        await loadWorkspace(folder.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || 'Project');
+      } catch { alert('Could not reach the local server.'); }
+      return;
     }
-    if (!folder || !folder.trim()) return;
-    try {
-      const res = await fetch('http://localhost:3001/workspace/root', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folder }) });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { alert(data.error || 'Could not open that folder.'); return; }
-      // Reset editor state to the new root.
-      setTabs([]);
-      setActiveTabPath('');
-      setHistory([]);
-      setErrorLogs(null);
-      setPdfUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null; });
-      const tree: FileNode[] = await (await fetch('http://localhost:3001/workspace')).json();
-      setFileTree(tree);
-      // Open a starter file directly (don't route through openFile, whose closure
-      // still holds the pre-switch tab list).
-      const first = findFirstTyp(tree);
-      if (first) {
-        const r = await fetch(`http://localhost:3001/workspace/file?path=${encodeURIComponent(first)}`);
-        if (r.ok) { const content = await r.text(); setTabs([{ path: first, content, isDirty: false }]); setActiveTabPath(first); }
-      }
-    } catch { alert('Could not reach the local server.'); }
+    // Browser: native folder picker.
+    const input = document.createElement('input');
+    input.type = 'file';
+    (input as any).webkitdirectory = true;
+    input.multiple = true;
+    input.onchange = async () => {
+      const files = Array.from(input.files || []);
+      if (!files.length) return;
+      const rootName = (((files[0] as any).webkitRelativePath || files[0].name).split('/')[0]) || 'Project';
+      if (!confirm(`Open “${rootName}” as the workspace? This replaces the current file list (${files.length} files). Folders elsewhere on your disk are not touched.`)) return;
+      const TEXT_EXT = ['typ', 'bib', 'txt', 'md', 'csv', 'json', 'yml', 'yaml', 'toml', 'xml', 'tex', 'html', 'css', 'js'];
+      try {
+        await fetch('http://localhost:3001/workspace/clear', { method: 'POST' });
+        for (const f of files) {
+          const rel = (f as any).webkitRelativePath || f.name;
+          if (rel.includes('/.') || rel.includes('node_modules/')) continue;
+          // Drop the chosen folder's own name so its *contents* become the root.
+          const dest = rel.split('/').slice(1).join('/') || f.name;
+          const ext = (f.name.split('.').pop() || '').toLowerCase();
+          if (TEXT_EXT.includes(ext)) {
+            const text = await f.text();
+            await fetch(`http://localhost:3001/workspace/file?path=${encodeURIComponent(dest)}`, { method: 'POST', body: text, headers: { 'Content-Type': 'text/plain' } });
+          } else {
+            const buf = await f.arrayBuffer();
+            await fetch(`http://localhost:3001/workspace/upload?path=${encodeURIComponent(dest)}`, { method: 'POST', body: buf, headers: { 'Content-Type': 'application/octet-stream' } });
+          }
+        }
+        await loadWorkspace(rootName);
+      } catch { alert('Could not import that folder.'); }
+    };
+    input.click();
   };
 
   // Import a data file (CSV/JSON/…) into the workspace and insert the matching
@@ -1499,6 +1535,8 @@ export default function App() {
                   automaticLayout: true,
                   minimap: { enabled: false },
                   wordWrap: 'on',
+                  // Only offer our Typst completions — no generic word/HTML noise.
+                  wordBasedSuggestions: 'off',
                   fontSize: 14,
                   lineNumbers: 'on',
                   scrollBeyondLastLine: false,
