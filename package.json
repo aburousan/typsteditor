@@ -46,8 +46,7 @@
     },
     "linux": {
       "target": [
-        "AppImage",
-        "deb"
+        "AppImage"
       ],
       "category": "Office",
       "maintainer": "Kazi Abu Rousan"

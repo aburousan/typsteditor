@@ -209,11 +209,11 @@ export default function SymbolDraw({ onClose, onInsert }: { onClose: () => void;
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content" style={{ width: '640px' }} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
-          <h2>Draw a Symbol → Typst</h2>
+          <h2>Draw a Symbol → Typst <span style={{ fontSize: 11, fontWeight: 600, color: '#fbbf24', border: '1px solid #fbbf24', borderRadius: 4, padding: '1px 6px', marginLeft: 6, verticalAlign: 'middle' }}>experimental</span></h2>
           <button className="close-btn" onClick={onClose}>×</button>
         </div>
         <div className="modal-body">
-          <div className="form-hint">Draw a maths/physics symbol below — matches appear on the right. Click one to insert its Typst code. Multi-stroke symbols are fine.</div>
+          <div className="form-hint">Draw a maths/physics symbol below — best-guess matches appear on the right. Click one to insert its Typst code. It's a rough recognizer, so it shows several candidates; multi-stroke symbols are fine.</div>
           <div style={{ display: 'flex', gap: 14 }}>
             <div style={{ flex: '0 0 auto' }}>
               <canvas
