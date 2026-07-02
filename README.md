@@ -62,7 +62,9 @@ result straight into the document.
   **draw-a-symbol** pad: sketch a symbol and it guesses the Typst code.
 - **Theorems / proofs / lemmas** — plain or in coloured boxes, each kind numbered
   on its own.
-- **Feynman diagrams** (`fletcher`) from ready-made, editable templates.
+- **Commutative diagrams** drawn visually with a bundled, offline copy of
+  [quiver](https://github.com/varkor/quiver) — *Insert Diagram* drops the
+  result into the document as editable `fletcher` code.
 
 **Maths that computes**
 - **Run code → insert result** (Python / Julia / Wolfram). Take the text output,
@@ -224,3 +226,6 @@ to. For Google Drive you supply your own OAuth Client ID in App Settings.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Bundled third-party software: [quiver](https://github.com/varkor/quiver)
+(MIT, © varkor) with [KaTeX](https://katex.org/) (MIT) under `public/quiver/`.
