@@ -210,22 +210,67 @@ app.post('/init-template', (req, res) => {
   });
 });
 
-app.get('/packages', (req, res) => {
-  const query = req.query.q || '';
-  const searchProcess = spawn('python3', [
-    '/Users/kaziaburousan/.gemini/skills/typst/scripts/search-packages.py',
-    query,
-    '--json'
-  ]);
-  let output = '';
-  searchProcess.stdout.on('data', data => output += data.toString());
-  searchProcess.on('close', () => {
-    try {
-      res.json(output.trim() ? JSON.parse(output) : []);
-    } catch (e) {
-      res.status(500).json({ error: 'Failed to parse package data' });
-    }
-  });
+// Typst Universe package search — self-contained (no external scripts/data).
+// Fetches the official index once, caches it on disk, and matches locally so it
+// works on any machine.
+const UNIVERSE_INDEX_URL = 'https://packages.typst.org/preview/index.json';
+const UNIVERSE_CACHE = join(tmpdir(), 'typst-editor-universe-index.json');
+const UNIVERSE_TTL_MS = 24 * 3600 * 1000;
+let universeCache = null;       // deduped-to-latest array
+let universeCacheAt = 0;
+
+const cmpVersion = (a, b) => {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  return 0;
+};
+
+async function getUniverseIndex() {
+  const now = Date.now();
+  if (universeCache && now - universeCacheAt < UNIVERSE_TTL_MS) return universeCache;
+  let raw = null;
+  try {
+    const r = await (typeof fetchWithTimeout === 'function' ? fetchWithTimeout(UNIVERSE_INDEX_URL, {}, 15000) : fetch(UNIVERSE_INDEX_URL));
+    if (r.ok) { raw = await r.text(); try { writeFileSync(UNIVERSE_CACHE, raw); } catch {} }
+  } catch { /* offline — fall through to cache */ }
+  if (!raw && existsSync(UNIVERSE_CACHE)) { try { raw = readFileSync(UNIVERSE_CACHE, 'utf-8'); } catch {} }
+  if (!raw) return universeCache; // may be null on a first-ever offline run
+  let all;
+  try { all = JSON.parse(raw); } catch { return universeCache; }
+  // Keep only the latest version of each package.
+  const byName = new Map();
+  for (const p of all) {
+    if (!p || !p.name) continue;
+    const cur = byName.get(p.name);
+    if (!cur || cmpVersion(p.version, cur.version) > 0) byName.set(p.name, p);
+  }
+  universeCache = [...byName.values()];
+  universeCacheAt = now;
+  return universeCache;
+}
+
+app.get('/packages', async (req, res) => {
+  const q = String(req.query.q || '').toLowerCase().trim();
+  const idx = await getUniverseIndex();
+  if (!idx) return res.json([]); // no network and no cache yet
+  const tokens = q.split(/[^a-z0-9]+/).filter(t => t.length > 1);
+  const scored = [];
+  for (const p of idx) {
+    const name = String(p.name || '').toLowerCase();
+    const hay = `${name} ${(p.description || '')} ${(p.keywords || []).join(' ')} ${(p.categories || []).join(' ')}`.toLowerCase();
+    let score = 0;
+    if (!tokens.length) score = 1;
+    else for (const t of tokens) { if (name.includes(t)) score += 3; else if (hay.includes(t)) score += 1; }
+    if (score > 0) scored.push([score, p]);
+  }
+  scored.sort((a, b) => b[0] - a[0]);
+  res.json(scored.slice(0, 15).map(([, p]) => ({
+    name: p.name,
+    version: p.version,
+    description: p.description || '',
+    authors: (p.authors || []).map(a => String(a).replace(/\s*<[^>]*>/g, '').trim()).filter(Boolean),
+  })));
 });
 
 // ---------------------------------------------------------------------------
