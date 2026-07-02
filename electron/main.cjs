@@ -52,8 +52,11 @@ function seedPackages() {
 }
 
 function startServer() {
+  // NB: do NOT pass `cwd` here. Inside an AppImage the app lives on a FUSE mount,
+  // and Electron's utility process aborts with "Check failed: chdir(...) == 0"
+  // when told to chdir into it — the backend then never starts (blank window on
+  // Linux). server.js relies only on the env vars below, not the working dir.
   serverProc = utilityProcess.fork(path.join(ROOT, 'server.js'), [], {
-    cwd: ROOT,
     stdio: 'inherit',
     env: {
       ...process.env,
