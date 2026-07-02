@@ -97,6 +97,53 @@ interface HistoryEntry {
   content: string;
 }
 
+// Best-effort LaTeX math → Typst math, for labels coming out of quiver (which
+// are written for KaTeX). Covers the symbols that show up in commutative
+// diagrams; anything unknown just has its backslash dropped, which is already
+// right for Greek letters and many operator names.
+const LATEX_FN: Record<string, string> = {
+  mathbb: 'bb', mathcal: 'cal', mathfrak: 'frak', mathbf: 'bold', boldsymbol: 'bold',
+  mathsf: 'sans', mathtt: 'mono', mathrm: 'upright', text: 'upright', textrm: 'upright',
+  operatorname: 'op', hat: 'hat', tilde: 'tilde', vec: 'arrow', bar: 'macron',
+  overline: 'overline', underline: 'underline', dot: 'dot', ddot: 'dot.double', sqrt: 'sqrt',
+};
+const LATEX_SYM: Record<string, string> = {
+  bullet: 'bullet', circ: 'compose', cdot: 'dot.op', ast: 'ast', star: 'star',
+  times: 'times', otimes: 'times.circle', oplus: 'plus.circle', ominus: 'minus.circle',
+  odot: 'dot.circle', pm: 'plus.minus', mp: 'minus.plus', div: 'div',
+  to: 'arrow.r', rightarrow: 'arrow.r', longrightarrow: 'arrow.r.long', leftarrow: 'arrow.l',
+  longleftarrow: 'arrow.l.long', leftrightarrow: 'arrow.l.r', Rightarrow: 'arrow.r.double',
+  Leftarrow: 'arrow.l.double', Leftrightarrow: 'arrow.l.r.double', mapsto: 'arrow.r.bar',
+  longmapsto: 'arrow.r.long.bar', hookrightarrow: 'arrow.r.hook', hookleftarrow: 'arrow.l.hook',
+  twoheadrightarrow: 'arrow.r.twohead', rightharpoonup: 'harpoon.rt', uparrow: 'arrow.t',
+  downarrow: 'arrow.b', Uparrow: 'arrow.t.double', Downarrow: 'arrow.b.double',
+  nearrow: 'arrow.tr', searrow: 'arrow.br', swarrow: 'arrow.bl', nwarrow: 'arrow.tl',
+  infty: 'infinity', partial: 'diff', emptyset: 'nothing', varnothing: 'nothing',
+  setminus: 'without', subseteq: 'subset.eq', supseteq: 'supset.eq', notin: 'in.not',
+  ni: 'in.rev', cup: 'union', cap: 'sect', bigcup: 'union.big', bigcap: 'sect.big',
+  wedge: 'and', vee: 'or', lnot: 'not', neg: 'not',
+  neq: 'eq.not', ne: 'eq.not', leq: 'lt.eq', le: 'lt.eq', geq: 'gt.eq', ge: 'gt.eq',
+  ll: 'lt.double', gg: 'gt.double', cong: 'tilde.equiv', simeq: 'tilde.eq', sim: 'tilde.op',
+  propto: 'prop', langle: 'angle.l', rangle: 'angle.r',
+  ldots: 'dots.h', cdots: 'dots.h.c', vdots: 'dots.v', ddots: 'dots.down',
+  hbar: 'planck.reduce', dagger: 'dagger', ddagger: 'dagger.double',
+  int: 'integral', oint: 'integral.cont', prod: 'product', coprod: 'product.co',
+  bigoplus: 'plus.circle.big', bigotimes: 'times.circle.big',
+  varepsilon: 'epsilon.alt', varphi: 'phi.alt', vartheta: 'theta.alt', varrho: 'rho.alt',
+  Box: 'square.stroked', perp: 'perp', parallel: 'parallel',
+};
+export const latexMathToTypst = (s: string): string => {
+  let out = s;
+  for (let i = 0; i < 8 && /\\frac\s*\{[^{}]*\}\s*\{[^{}]*\}/.test(out); i++)
+    out = out.replace(/\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, '($1)/($2)');
+  for (let i = 0; i < 8 && /\\[a-zA-Z]+\s*\{[^{}]*\}/.test(out); i++)
+    out = out.replace(/\\([a-zA-Z]+)\s*\{([^{}]*)\}/g,
+      (_, name, body) => `${LATEX_FN[name] ?? LATEX_SYM[name] ?? name}(${body})`);
+  out = out.replace(/\\([a-zA-Z]+)/g, (_, name) => (LATEX_SYM[name] ?? LATEX_FN[name] ?? name) + ' ');
+  out = out.replace(/\{/g, '(').replace(/\}/g, ')');
+  return out.replace(/\s+([_^])/g, '$1').replace(/\s{2,}/g, ' ').trim();
+};
+
 export default function App() {
   const editorRef = useRef<any>(null);
   const [tabs, setTabs] = useState<Tab[]>([{ path: 'main.typ', content: DEFAULT_CODE, isDirty: true }]);
@@ -1193,9 +1240,14 @@ export default function App() {
 
   // Insert a commutative diagram drawn in quiver: add the fletcher import once,
   // then drop in the exported diagram code (stripping quiver's permalink comment).
+  // quiver labels are LaTeX (it renders them with KaTeX) and its fletcher export
+  // pastes them into Typst math verbatim — so `\bullet` arrives as an escape and
+  // fails with "unknown variable: ullet". Translate the common macros.
   const insertQuiverDiagram = (code: string) => {
     ensureRule('@preview/fletcher', '#import "@preview/fletcher:0.5.8" as fletcher: diagram, node, edge');
-    const clean = code.replace(/^\/\/[^\n]*\n/, '').trim();
+    const clean = code.replace(/^\/\/[^\n]*\n/, '').trim()
+      .replace(/\[\$(.*?)\$\]/g, (m, inner) =>
+        inner.includes('\\') || /[{}]/.test(inner) ? `[$${latexMathToTypst(inner)}$]` : m);
     insertCode(`\n${clean}\n\n`);
     setShowQuiver(false);
   };
