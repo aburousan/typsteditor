@@ -14,8 +14,7 @@
 
   #v(0.5em)
   Kazi Abu Rousan \
-  #text(fill: gray)[Department of Physics] \
-  #link("mailto:kaziaburousan@gmail.com")[kaziaburousan\@gmail.com]
+  #text(fill: gray)[Department of Physics]
 
   #v(0.4em)
   #text(fill: gray, size: 9pt)[Compiled with Typst · math via #raw("physica") · plots via #raw("cetz")]
