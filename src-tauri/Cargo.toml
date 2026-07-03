@@ -1,0 +1,33 @@
+[package]
+name = "typst-editor"
+version = "0.1.1"
+description = "A local, offline editor for Typst aimed at maths/physics writing."
+authors = ["Kazi Abu Rousan"]
+license = "MIT"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+regex = "1"
+base64 = "0.22"
+dirs = "6"
+mime_guess = "2"
+percent-encoding = "2"
+open = "5"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+panic = "abort"

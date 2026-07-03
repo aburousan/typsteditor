@@ -1,0 +1,60 @@
+name: Build desktop bundles
+
+# Tauri compiles native code against each OS's system webview (WebKitGTK on
+# Linux, WebView2 on Windows, WKWebView on macOS), so — unlike Electron — it
+# cannot cross-compile. Each target is built on its own runner.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+    branches: ["tauri-port"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04        # Linux: AppImage + .deb + .rpm
+            args: ""
+          - os: windows-latest      # Windows: NSIS .exe + .msi
+            args: ""
+          - os: macos-14            # macOS Apple Silicon: .app + .dmg
+            args: "--target aarch64-apple-darwin"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The built UI (resources/dist) is committed in this repo — no frontend
+      # build step needed here. To refresh it, rebuild the sibling project and
+      # re-copy dist (see README).
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libgtk-3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-14' && 'aarch64-apple-darwin' || '' }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: .
+          args: ${{ matrix.args }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundles-${{ matrix.os }}
+          path: |
+            src-tauri/target/**/release/bundle/**/*.AppImage
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.rpm
+            src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.dmg
