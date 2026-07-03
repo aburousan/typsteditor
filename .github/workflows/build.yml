@@ -1,15 +1,18 @@
 name: Build desktop bundles
 
 # Tauri compiles native code against each OS's system webview (WebKitGTK on
-# Linux, WebView2 on Windows, WKWebView on macOS), so — unlike Electron — it
-# cannot cross-compile. Each target is built on its own runner.
+# Linux, WKWebView on macOS), so — unlike Electron — it cannot cross-compile;
+# each target is built on its own runner.
 #
-# Triggers use the `tauri-v*` tag prefix (NOT the Electron `v*` tags) so the two
-# release lines never collide: Electron keeps `v0.1.x`, Tauri uses `tauri-v0.1.x`.
+# Windows is intentionally omitted: a native windows-latest runner can be added
+# back to the matrix when a Windows build is wanted (the cargo-xwin cross-build
+# is unreliable — see the README).
+#
+# Build-only: uploads per-platform artifacts you can download from the run.
+# Releases are cut manually (see README) so the Electron `v*` and Tauri
+# `tauri-v*` release lines stay cleanly separated.
 on:
   workflow_dispatch:        # build on demand from the Actions tab
-  push:
-    tags: ["tauri-v*"]      # release build (creates a draft release)
 
 jobs:
   build:
@@ -17,9 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04        # Linux: AppImage + .deb + .rpm
-            args: ""
-          - os: windows-latest      # Windows: NSIS .exe + .msi
+          - os: ubuntu-22.04        # Linux: AppImage + .deb
             args: ""
           - os: macos-14            # macOS Apple Silicon: .app + .dmg
             args: "--target aarch64-apple-darwin"
@@ -45,21 +46,10 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # On a `tauri-v*` tag: create/attach to a separate, clearly-named GitHub
-      # Release (draft, so you publish it deliberately) — kept distinct from the
-      # Electron releases. On a branch push: tagName is empty, so it only builds
-      # and the artifacts are grabbed by upload-artifact below.
       - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: .
           args: ${{ matrix.args }}
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: "Typst Editor (Tauri) v__VERSION__"
-          releaseBody: "Tauri desktop build. Native installers per platform, attached below."
-          releaseDraft: true
-          prerelease: false
 
       - uses: actions/upload-artifact@v4
         with:
@@ -67,7 +57,4 @@ jobs:
           path: |
             src-tauri/target/**/release/bundle/**/*.AppImage
             src-tauri/target/**/release/bundle/**/*.deb
-            src-tauri/target/**/release/bundle/**/*.rpm
-            src-tauri/target/**/release/bundle/**/*.exe
-            src-tauri/target/**/release/bundle/**/*.msi
             src-tauri/target/**/release/bundle/**/*.dmg
