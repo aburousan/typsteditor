@@ -97,12 +97,42 @@ resulting app frequently fails to launch on real Windows (resource / WebView2
 embedding differs from a native MSVC build). Confirmed broken in testing, so do
 **not** ship the cross-built `.exe`. Use CI instead:
 
-### GitHub Actions — the supported route (`.github/workflows/build.yml`)
+### GitHub Actions (`.github/workflows/build.yml`)
 
-Pushing the `tauri-port` branch (or a `v*` tag, or a manual run) builds on
-**native** runners — Linux (AppImage + `.deb` + `.rpm`), Windows (NSIS `.exe` +
-`.msi`) and macOS (`.dmg`) — and uploads each as an artifact. This is the only
-reliable way to get a working Windows build without a Windows machine.
+A manual **workflow_dispatch** build runs on native macOS + Linux runners and
+uploads each bundle as a downloadable artifact (build-only — it does not cut a
+release). Windows is omitted; add a `windows-latest` matrix entry back when a
+native Windows build is wanted.
+
+## Releases — Electron vs Tauri, kept separate
+
+Both live in the one `aburousan/typsteditor` repo but never collide, by
+convention:
+
+| | Branch | Tag | Release title | Bundle names |
+| --- | --- | --- | --- | --- |
+| **Electron** (original) | `main` | `v0.1.1` | *Typst Editor v0.1.1 (Electron)* | `TypstEditor-Electron-<ver>-<os>-<arch>.…` |
+| **Tauri** (this port) | `tauri-port` | `tauri-v0.1.1` | *Typst Editor (Tauri) v0.1.1* | `TypstEditor-Tauri-<ver>-<os>-<arch>.…` |
+
+Releases are cut manually so the two lines stay clean. The bundles are built
+locally (macOS) and on the Linux server (`linux-build/` for Tauri,
+`electron-build/` on the server for the Electron AppImage), then:
+
+```bash
+# Electron
+gh release create v0.1.1 --target main \
+  --title "Typst Editor v0.1.1 (Electron)" --notes-file notes.md \
+  TypstEditor-Electron-0.1.1-macOS-arm64.dmg TypstEditor-Electron-0.1.1-Linux-x86_64.AppImage
+
+# Tauri
+gh release create tauri-v0.1.1 --target tauri-port \
+  --title "Typst Editor (Tauri) v0.1.1" --notes-file notes.md \
+  TypstEditor-Tauri-0.1.1-macOS-arm64.dmg TypstEditor-Tauri-0.1.1-Linux-x86_64.deb \
+  TypstEditor-Tauri-0.1.1-Linux-x86_64.AppImage
+```
+
+GitHub attaches the tagged source archive to each release automatically, so each
+download page also carries its own code.
 
 ## Headless / server-only mode
 
