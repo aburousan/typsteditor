@@ -33,7 +33,7 @@ const SYMBOLS: { name: string; ch: string }[] = [
   { name: 'partial', ch: '∂' }, { name: 'nabla', ch: '∇' }, { name: 'sqrt(x)', ch: '√' },
   { name: 'infinity', ch: '∞' }, { name: 'plus.minus', ch: '±' }, { name: 'minus.plus', ch: '∓' },
   { name: 'times', ch: '×' }, { name: 'div', ch: '÷' }, { name: 'dot', ch: '⋅' },
-  { name: 'plus.circle', ch: '⊕' }, { name: 'times.circle', ch: '⊗' },
+  { name: 'plus.o', ch: '⊕' }, { name: 'times.o', ch: '⊗' },
   // Relations
   { name: 'lt.eq', ch: '≤' }, { name: 'gt.eq', ch: '≥' }, { name: 'eq.not', ch: '≠' },
   { name: 'approx', ch: '≈' }, { name: 'equiv', ch: '≡' }, { name: 'prop', ch: '∝' },
@@ -44,7 +44,7 @@ const SYMBOLS: { name: string; ch: string }[] = [
   { name: 'arrow.l.double', ch: '⇐' }, { name: 'arrow.r.bar', ch: '↦' },
   // Sets / logic
   { name: 'in', ch: '∈' }, { name: 'in.not', ch: '∉' }, { name: 'subset', ch: '⊂' },
-  { name: 'subset.eq', ch: '⊆' }, { name: 'union', ch: '∪' }, { name: 'sect', ch: '∩' },
+  { name: 'subset.eq', ch: '⊆' }, { name: 'union', ch: '∪' }, { name: 'inter', ch: '∩' },
   { name: 'emptyset', ch: '∅' }, { name: 'forall', ch: '∀' }, { name: 'exists', ch: '∃' },
   { name: 'therefore', ch: '∴' }, { name: 'angle', ch: '∠' }, { name: 'degree', ch: '°' },
   // Blackboard
@@ -202,6 +202,20 @@ function skeletonPoints(src: HTMLCanvasElement): Pt[] {
 
 type Template = { name: string; ch: string; vec: Float32Array; cloud: Pt[] };
 
+// Hand-drawn-style extra templates for glyphs whose font shape differs from how
+// people actually draw them: a drawn ∫ is a broad S-curve, while the font's is a
+// nearly straight bar (which used to lose against ↑/↓). Same name → the best
+// score of the font and synthetic variants wins.
+const SYNTH: { name: string; ch: string; strokes: Pt[][] }[] = [
+  { name: 'integral', ch: '∫', strokes: [Array.from({ length: 65 }, (_, i) => { const t = i / 64; return { x: 60 + 34 * Math.cos(Math.PI * t), y: 10 + 140 * t }; })] },
+  { name: 'integral.cont', ch: '∮', strokes: [
+    Array.from({ length: 65 }, (_, i) => { const t = i / 64; return { x: 60 + 34 * Math.cos(Math.PI * t), y: 10 + 140 * t }; }),
+    Array.from({ length: 33 }, (_, i) => { const a = (i / 32) * 2 * Math.PI; return { x: 60 + 22 * Math.cos(a), y: 80 + 22 * Math.sin(a) }; }),
+  ] },
+];
+
+const TEMPLATE_FONT = (px: number) => `${px}px "STIX Two Math", "Cambria Math", "STIXGeneral", "Apple Symbols", "Segoe UI Symbol", serif`;
+
 function buildTemplates(): Template[] {
   const S = 128;
   const cv = document.createElement('canvas'); cv.width = S; cv.height = S;
@@ -209,15 +223,29 @@ function buildTemplates(): Template[] {
   const out: Template[] = [];
   for (const sym of SYMBOLS) {
     ctx.clearRect(0, 0, S, S);
-    ctx.fillStyle = '#000'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.font = `96px "STIX Two Math", "Cambria Math", "STIXGeneral", "Apple Symbols", "Segoe UI Symbol", serif`;
-    ctx.fillText(sym.ch, S / 2, S / 2);
+    ctx.fillStyle = '#000'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    // Fit the glyph inside the canvas: tall glyphs (∫ ∮ ∑ √) overflow 96px in a
+    // 128px box, and a clipped ∫ degenerates into a plain vertical bar.
+    ctx.font = TEMPLATE_FONT(96);
+    const m = ctx.measureText(sym.ch);
+    const gw = (m.actualBoundingBoxLeft ?? 0) + (m.actualBoundingBoxRight ?? 0);
+    const gh = (m.actualBoundingBoxAscent ?? 0) + (m.actualBoundingBoxDescent ?? 0);
+    const fit = Math.min(1, (S - 12) / Math.max(gw, gh, 1));
+    if (fit < 1) ctx.font = TEMPLATE_FONT(Math.floor(96 * fit));
+    const m2 = ctx.measureText(sym.ch);
+    const y = S / 2 + ((m2.actualBoundingBoxAscent ?? 0) - (m2.actualBoundingBoxDescent ?? 0)) / 2;
+    ctx.fillText(sym.ch, S / 2, y);
     const d = ctx.getImageData(0, 0, S, S).data;
     let ink = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 40) ink++;
     if (ink < 20) continue; // glyph unsupported by available fonts
     const sk = skeletonPoints(cv);
     if (sk.length < 5) continue;
     out.push({ name: sym.name, ch: sym.ch, vec: toVector(cv), cloud: samplePoints(normalizeCloud(sk), CLOUD_N) });
+  }
+  for (const s of SYNTH) {
+    const gc = gestureCanvas(s.strokes);
+    if (!gc) continue;
+    out.push({ name: s.name, ch: s.ch, vec: toVector(gc), cloud: samplePoints(normalizeCloud(s.strokes.flat()), CLOUD_N) });
   }
   return out;
 }
@@ -308,7 +336,9 @@ export default function SymbolDraw({ onClose, onInsert }: { onClose: () => void;
       return { name: t.name, ch: t.ch, score: 0.55 * simP + 0.45 * simB };
     });
     scored.sort((a, b) => b.score - a.score);
-    setResults(scored.slice(0, 10));
+    // A symbol can have several template variants (font + hand-drawn) — show it once.
+    const seen = new Set<string>();
+    setResults(scored.filter(r => !seen.has(r.name) && seen.add(r.name)).slice(0, 10));
   };
 
   const clear = () => { strokesRef.current = []; setResults([]); redraw(); };

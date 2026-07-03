@@ -13,7 +13,14 @@ type GitStatus = {
 type Interp = { label: string; path: string };
 type Tools = { execEnabled: boolean; interpreters: Record<string, Interp[]> };
 
-export default function AppSettingsModal({ onClose }: { onClose: () => void }) {
+type SettingsProps = {
+  onClose: () => void,
+  theme: 'typst-dark' | 'typst-light', onTheme: (t: 'typst-dark' | 'typst-light') => void,
+  fontSize: number, onFontSize: (n: number) => void,
+  compileDelay: number, onCompileDelay: (n: number) => void,
+};
+
+export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, onFontSize, compileDelay, onCompileDelay }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<'general' | 'interpreters' | 'git' | 'cloud'>('general');
   const [tools, setTools] = useState<Tools | null>(null);
   const [picked, setPicked] = useState<Record<string, string>>({});
@@ -73,8 +80,8 @@ export default function AppSettingsModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" style={{ width: '620px', display: 'flex', height: '460px', padding: 0, overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
-        <div style={{ width: '180px', background: 'var(--panel-bg)', borderRight: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column' }}>
+      <div className="modal-content" style={{ width: '640px', maxWidth: '94vw', display: 'flex', flexDirection: 'row', height: '480px', maxHeight: '86vh', padding: 0, overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
+        <div style={{ width: '180px', flex: '0 0 180px', background: 'var(--panel-bg)', borderRight: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column' }}>
           <div style={{ padding: '15px', fontWeight: 'bold', borderBottom: '1px solid var(--border-color)' }}>App Settings</div>
           {(['general', 'interpreters', 'git', 'cloud'] as const).map(t => (
             <div key={t}
@@ -94,17 +101,28 @@ export default function AppSettingsModal({ onClose }: { onClose: () => void }) {
               <h2 style={{ marginTop: 0 }}>General Settings</h2>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '20px' }}>
                 <label style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                  Default Theme:
-                  <select style={inputStyle}>
-                    <option>Dark Mode</option>
-                    <option>Light Mode</option>
-                    <option>System Default</option>
+                  Editor Theme:
+                  <select style={inputStyle} value={theme} onChange={e => onTheme(e.target.value as 'typst-dark' | 'typst-light')}>
+                    <option value="typst-dark">Dark Mode</option>
+                    <option value="typst-light">Light Mode</option>
                   </select>
                 </label>
                 <label style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                   Editor Font Size:
-                  <input type="number" defaultValue={14} style={inputStyle} />
+                  <input type="number" min={10} max={24} value={fontSize} onChange={e => onFontSize(Math.min(24, Math.max(10, Number(e.target.value) || 14)))} style={inputStyle} />
                 </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                  Auto-compile after typing stops:
+                  <select style={inputStyle} value={compileDelay} onChange={e => onCompileDelay(Number(e.target.value))}>
+                    <option value={500}>0.5 s — fastest feedback</option>
+                    <option value={1000}>1 s — default</option>
+                    <option value={2000}>2 s — big documents</option>
+                    <option value={4000}>4 s — huge documents / slow machines</option>
+                  </select>
+                </label>
+                <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
+                  All three apply immediately and are remembered on this machine. ⌘S always compiles right away.
+                </p>
               </div>
             </div>
           )}

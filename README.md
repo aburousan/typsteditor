@@ -57,9 +57,13 @@ result straight into the document.
 - Live PDF preview that recompiles as you type, with zoom / fit-to-width and a
   dark mode. Double-click a word in the PDF to jump to it in the source (it uses
   the surrounding words to land on the right one).
-- Monaco editor with Typst highlighting, completions, `@`-reference autocomplete,
-  a file tree (files **and** folders, image upload), an outline, a clickable
-  **Problems** panel, and resizable panes.
+- Monaco editor with Typst highlighting, completions (including Greek letters,
+  physics symbols and `physica` functions inside `$…$`), `@`-reference
+  autocomplete, a file tree (files **and** folders, image upload), an outline, a
+  clickable **Problems** panel, and resizable panes.
+- **Open Folder** works like VS Code — pick any folder as the workspace (edits
+  save back to disk in the desktop app and Chrome/Edge) — with **File → Open
+  Recent** to jump back to it later.
 
 **Inserting the annoying stuff**
 - Title blocks, headings, abstracts; inline / block / aligned / **numbered**
@@ -70,9 +74,17 @@ result straight into the document.
   **draw-a-symbol** pad: sketch a symbol and it guesses the Typst code.
 - **Theorems / proofs / lemmas** — plain or in coloured boxes, each kind numbered
   on its own.
+- A **Physics & Cosmology menu** with ready-made, compile-checked equations —
+  bra–kets, commutators, the Dirac / Klein–Gordon equations, the QED Lagrangian,
+  Einstein's field equations, Christoffel symbols, the FRW metric, the Friedmann
+  equations, and more.
 - **Commutative diagrams** drawn visually with a bundled, offline copy of
   [quiver](https://github.com/varkor/quiver) — *Insert Diagram* drops the
   result into the document as editable `fletcher` code.
+- **Feynman diagrams** drawn visually — fermion / photon / gluon / scalar / ghost
+  propagators, loops (plain, wavy or coiled circles), hatched or shaded blobs,
+  vertices and labels, with per-element colour and thickness — inserted as
+  editable `cetz` code.
 
 **Maths that computes**
 - **Run code → insert result** (Python / Julia / Wolfram). Take the text output,
@@ -103,7 +115,7 @@ result straight into the document.
 ## What you need
 
 - **Node.js 18+**
-- **[Typst CLI](https://github.com/typst/typst)** on your `PATH`
+- **[Typst CLI](https://github.com/typst/typst) 0.14 or newer** on your `PATH`
   (`brew install typst`, `cargo install typst-cli`, or a release binary).
 - Optional, only for running code:
   - **Python 3** with `numpy`, `matplotlib`, `sympy`

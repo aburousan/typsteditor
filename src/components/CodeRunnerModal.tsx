@@ -15,14 +15,21 @@ const TEMPLATES: Record<Lang, { label: string; code: string }[]> = {
     { label: 'Symbolic → equation (sympy)', code: 'from sympy import *\n\nx = symbols("x")\nexpr = diff(sin(x**2), x)\nprint(latex(expr))' },
     { label: '2D plot', code: 'import matplotlib\nmatplotlib.use("Agg")\nimport matplotlib.pyplot as plt\nimport numpy as np\n\nx = np.linspace(0, 2*np.pi, 200)\nplt.figure(figsize=(6,4))\nplt.plot(x, np.sin(x), label="sin")\nplt.legend(); plt.grid(True)\nplt.savefig("figure.png", dpi=150, bbox_inches="tight")\nprint("saved figure.png")' },
     { label: '3D surface', code: 'import matplotlib\nmatplotlib.use("Agg")\nimport matplotlib.pyplot as plt\nimport numpy as np\n\nx = np.linspace(-5, 5, 60); y = np.linspace(-5, 5, 60)\nX, Y = np.meshgrid(x, y)\nZ = np.sin(np.sqrt(X**2 + Y**2))\nfig = plt.figure(figsize=(6,5))\nax = fig.add_subplot(111, projection="3d")\nax.plot_surface(X, Y, Z, cmap="viridis")\nplt.savefig("surface3d.png", dpi=150, bbox_inches="tight")\nprint("saved surface3d.png")' },
+    { label: 'GR: Christoffel symbols (sympy)', code: '# Christoffels of the flat-FRW metric — swap in any metric you like\nfrom sympy import *\n\nt, r, th, ph, k = symbols("t r theta phi k")\na = Function("a")(t)\nx = [t, r, th, ph]\ng = diag(-1, a**2/(1 - k*r**2), a**2*r**2, a**2*r**2*sin(th)**2)\nginv = g.inv()\nfor l in range(4):\n    for m in range(4):\n        for n in range(m, 4):\n            G = simplify(sum(ginv[l, s]*(diff(g[s, m], x[n]) + diff(g[s, n], x[m]) - diff(g[m, n], x[s])) for s in range(4))/2)\n            if G != 0:\n                print(f"Gamma^{x[l]}_({x[m]} {x[n]}) =", G)' },
+    { label: 'Cosmology: a(t) from Friedmann (scipy)', code: '# Scale factor for a flat matter + Lambda universe\nimport matplotlib\nmatplotlib.use("Agg")\nimport matplotlib.pyplot as plt\nimport numpy as np\nfrom scipy.integrate import solve_ivp\n\nH0 = 70/3.086e19            # s^-1\nOm, OL = 0.3, 0.7\nadot = lambda t, a: H0*np.sqrt(Om/a + OL*a**2)\nT = 4.6e17                  # ~14.6 Gyr in s\nsol = solve_ivp(adot, [0, T], [1e-3], dense_output=True, rtol=1e-8)\nt = np.linspace(1e-6*T, T, 400)\nplt.figure(figsize=(6,4))\nplt.plot(t/3.156e16, sol.sol(t)[0])\nplt.xlabel("t  [Gyr]"); plt.ylabel("a(t)"); plt.grid(True)\nplt.savefig("friedmann.png", dpi=150, bbox_inches="tight")\nprint("saved friedmann.png")' },
   ],
   julia: [
     { label: 'Compute (text)', code: 'println(sum(1:100))' },
     { label: 'Linear algebra', code: 'using LinearAlgebra\nA = [2 1; 1 3]\nprintln("eigenvalues: ", eigvals(A))' },
+    { label: 'Plot (Plots.jl)', code: 'using Plots\nx = range(0, 2π; length = 200)\nplot(x, sin.(x); label = "sin", lw = 2)\nsavefig("julia_plot.png")\nprintln("saved julia_plot.png")' },
+    { label: 'QM: harmonic oscillator spectrum', code: '# E_n of x²/2 potential by finite differences — exact: n + 1/2\nusing LinearAlgebra\nN = 400; dx = 0.05\nx = (-(N - 1)/2:(N - 1)/2) .* dx\nT = SymTridiagonal(fill(2.0, N), fill(-1.0, N - 1)) ./ (2dx^2)\nH = Matrix(T) + Diagonal(x .^ 2 ./ 2)\nprintln("lowest levels: ", round.(eigvals(H)[1:5]; digits = 4))' },
   ],
   wolfram: [
     { label: 'Numeric (text)', code: 'Print[N[Pi, 20]]\nPrint[Integrate[Sin[x], {x, 0, Pi}]]' },
+    { label: 'Symbolic → TeX', code: 'Print[ToString[TeXForm[Integrate[Exp[-x^2], {x, -Infinity, Infinity}]]]]' },
+    { label: 'Solve ODE (DSolve)', code: 'Print[DSolve[y\'\'[x] + w^2 y[x] == 0, y[x], x]]' },
     { label: 'Plot', code: 'Export["wolfram.png", Plot[Sin[x]/x, {x, -10, 10}, ImageSize -> 500]]\nPrint["saved wolfram.png"]' },
+    { label: '3D plot', code: 'Export["wolfram3d.png", Plot3D[Sin[x] Cos[y], {x, -3, 3}, {y, -3, 3}, ImageSize -> 500]]\nPrint["saved wolfram3d.png"]' },
   ],
 };
 

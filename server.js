@@ -660,12 +660,24 @@ app.post('/run', (req, res) => {
   const scriptName = `_run.${EXT[lang]}`;
   const scriptPath = join(SANDBOX_DIR, scriptName);
 
-  const listImages = () => readdirSync(SANDBOX_DIR).filter(f => IMAGE_EXT.some(e => f.toLowerCase().endsWith(e)));
-  const before = new Set(listImages());
+  // Track mtimes, not just names: re-running a script that overwrites the same
+  // plot (savefig("plot.png") twice) must still report it as fresh output.
+  const imageStats = () => {
+    const m = new Map();
+    for (const f of readdirSync(SANDBOX_DIR).filter(f => IMAGE_EXT.some(e => f.toLowerCase().endsWith(e)))) {
+      try { m.set(f, statSync(join(SANDBOX_DIR, f)).mtimeMs); } catch { /* raced away */ }
+    }
+    return m;
+  };
+  const before = imageStats();
 
   try { writeFileSync(scriptPath, code); } catch { return res.status(500).json({ error: 'Could not write script.' }); }
 
-  const args = lang === 'wolfram' ? ['-file', scriptName] : [scriptName];
+  // Julia: skip the user's startup.jl (often loads Revise/OhMyREPL and adds
+  // seconds of latency to every run) and stay quiet — noticeably snappier.
+  const args = lang === 'wolfram' ? ['-file', scriptName]
+    : lang === 'julia' ? ['--startup-file=no', '-q', scriptName]
+    : [scriptName];
   const child = spawn(chosen.path, args, { cwd: SANDBOX_DIR });
   let stdout = '', stderr = '', killed = false;
   const timer = setTimeout(() => { killed = true; child.kill('SIGKILL'); }, EXEC_TIMEOUT_MS);
@@ -678,8 +690,10 @@ app.post('/run', (req, res) => {
   });
   child.on('close', (codeNum) => {
     clearTimeout(timer);
-    // Report new images, referenced relative to the workspace (sandbox/<file>).
-    const images = listImages().filter(f => !before.has(f)).map(f => `sandbox/${f}`);
+    // Report new OR rewritten images, referenced relative to the workspace.
+    const images = [...imageStats().entries()]
+      .filter(([f, t]) => !before.has(f) || before.get(f) !== t)
+      .map(([f]) => `sandbox/${f}`);
     res.json({
       ok: codeNum === 0 && !killed,
       exitCode: codeNum,

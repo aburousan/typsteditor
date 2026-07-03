@@ -60,10 +60,8 @@
     }
   },
   "dependencies": {
-    "@types/three": "^0.185.0",
     "cors": "^2.8.6",
-    "express": "^5.2.1",
-    "three": "^0.185.1"
+    "express": "^5.2.1"
   },
   "devDependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -72,6 +70,7 @@
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.185.0",
     "@vitejs/plugin-react": "^6.0.3",
     "concurrently": "^10.0.3",
     "electron": "^33.0.0",
@@ -82,6 +81,7 @@
     "puppeteer": "^25.2.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "three": "^0.185.1",
     "typescript": "~6.0.2",
     "vite": "^8.1.1"
   },

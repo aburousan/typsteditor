@@ -343,6 +343,107 @@ export function setupTypstLanguage(monacoInstance: any) {
   }
   for (const k of KEYWORD_DOCS) DOCS.set(k.key, { doc: k.doc, detail: k.detail, insert: k.insert, url: k.url });
 
+  // Math-mode completions: Greek letters, operators and physics notation.
+  // Only offered between $...$ so prose isn't polluted with sigma/alpha noise.
+  // Symbol names target Typst 0.14+ — the old spellings (sect, diff, angle.l,
+  // planck.reduce, *.circle) were removed in Typst 0.15.
+  const GREEK: [string, string][] = [
+    ['alpha', 'α'], ['beta', 'β'], ['gamma', 'γ'], ['delta', 'δ'], ['epsilon', 'ε'], ['epsilon.alt', 'ϵ'],
+    ['zeta', 'ζ'], ['eta', 'η'], ['theta', 'θ'], ['theta.alt', 'ϑ'], ['iota', 'ι'], ['kappa', 'κ'],
+    ['lambda', 'λ'], ['mu', 'μ'], ['nu', 'ν'], ['xi', 'ξ'], ['pi', 'π'], ['rho', 'ρ'],
+    ['sigma', 'σ'], ['tau', 'τ'], ['upsilon', 'υ'], ['phi', 'φ'], ['phi.alt', 'ϕ'], ['chi', 'χ'],
+    ['psi', 'ψ'], ['omega', 'ω'],
+    ['Gamma', 'Γ'], ['Delta', 'Δ'], ['Theta', 'Θ'], ['Lambda', 'Λ'], ['Xi', 'Ξ'], ['Pi', 'Π'],
+    ['Sigma', 'Σ'], ['Upsilon', 'Υ'], ['Phi', 'Φ'], ['Psi', 'Ψ'], ['Omega', 'Ω'],
+  ];
+  const MATH_SYMS: [string, string][] = [
+    ['nabla', '∇'], ['partial', '∂'],
+    ['infinity', '∞'], ['dot', '⋅ (or accent dot(x))'], ['times', '×'], ['plus.minus', '±'], ['minus.plus', '∓'],
+    ['prop', '∝'], ['approx', '≈'], ['equiv', '≡'], ['tilde.op', '∼'], ['lt.eq', '≤'], ['gt.eq', '≥'],
+    ['lt.double', '≪'], ['gt.double', '≫'], ['arrow.r', '→'], ['arrow.l', '←'], ['arrow.r.double', '⇒'],
+    ['arrow.l.r', '↔'], ['arrow.r.bar', '↦ (maps to)'], ['sum', '∑'], ['product', '∏'],
+    ['integral', '∫'], ['integral.cont', '∮'], ['integral.double', '∬'], ['integral.triple', '∭'],
+    ['union', '∪'], ['inter', '∩'], ['in', '∈'], ['in.not', '∉'], ['subset', '⊂'], ['subset.eq', '⊆'],
+    ['forall', '∀'], ['exists', '∃'], ['nothing', '∅'], ['chevron.l', '⟨'], ['chevron.r', '⟩'],
+    ['dagger', '†'], ['star', '⋆'], ['ast', '∗'], ['plus.o', '⊕'], ['times.o', '⊗'],
+    ['dot.o', '⊙ (solar mass ☉ substitute)'], ['bar.v', '|'], ['parallel', '∥'], ['bot', '⊥'],
+    ['ell', 'ℓ'], ['Re', 'ℜ (real part)'], ['Im', 'ℑ (imaginary part)'], ['oo', '∞ (shorthand)'],
+    ['square', '□ (d\'Alembertian)'], ['dots.h', '⋯'], ['dots.v', '⋮'], ['dots.down', '⋱'],
+    ['prime', '′'], ['prime.double', '″'], ['degree', '°'], ['convolve', '∗ (convolution)'],
+    ['emptyset', '∅ (alias of nothing)'], ['hbar', 'ℏ (physica — imported by the default template)'],
+  ];
+  const MATH_FNS: { label: string, insertText: string, documentation: string, detail: string }[] = [
+    // Built-in math
+    { label: 'hat', insertText: 'hat(${1:x})', documentation: 'x̂ — hat accent (operators).', detail: 'Math' },
+    { label: 'tilde-accent', insertText: 'tilde(${1:x})', documentation: 'x̃ — tilde accent.', detail: 'Math' },
+    { label: 'dot-accent', insertText: 'dot(${1:x})', documentation: 'ẋ — time derivative dot.', detail: 'Math' },
+    { label: 'dot.double-accent', insertText: 'dot.double(${1:x})', documentation: 'ẍ — second time derivative.', detail: 'Math' },
+    { label: 'macron', insertText: 'macron(${1:psi})', documentation: 'x̄ — bar accent (e.g. Dirac adjoint ψ̄).', detail: 'Math' },
+    { label: 'arrow-accent', insertText: 'arrow(${1:x})', documentation: 'x⃗ — vector arrow accent.', detail: 'Math' },
+    { label: 'overline', insertText: 'overline(${1:x})', documentation: 'Overline across a whole expression.', detail: 'Math' },
+    { label: 'sqrt', insertText: 'sqrt(${1:x})', documentation: '√x — square root.', detail: 'Math' },
+    { label: 'root', insertText: 'root(${1:n}, ${2:x})', documentation: 'n-th root.', detail: 'Math' },
+    { label: 'frac', insertText: '(${1:a})/(${2:b})', documentation: 'Fraction — just write (a)/(b).', detail: 'Math' },
+    { label: 'binom', insertText: 'binom(${1:n}, ${2:k})', documentation: 'Binomial coefficient.', detail: 'Math' },
+    { label: 'abs', insertText: 'abs(${1:x})', documentation: '|x| — absolute value.', detail: 'Math' },
+    { label: 'norm', insertText: 'norm(${1:x})', documentation: '‖x‖ — norm.', detail: 'Math' },
+    { label: 'cases', insertText: 'cases(\n  ${1:1 quad &"if" x > 0},\n  ${2:0 quad &"otherwise"},\n)', documentation: 'Piecewise definition.', detail: 'Math' },
+    { label: 'mat', insertText: 'mat(\n  ${1:1, 0};\n  ${2:0, 1};\n)', documentation: 'Matrix.', detail: 'Math' },
+    { label: 'vec', insertText: 'vec(${1:x}, ${2:y})', documentation: 'Column vector.', detail: 'Math' },
+    { label: 'lim', insertText: 'lim_(${1:x -> 0})', documentation: 'Limit with subscript.', detail: 'Math' },
+    { label: 'cancel', insertText: 'cancel(${1:x})', documentation: 'Strike through a term (also used as Feynman slash).', detail: 'Math' },
+    // physica (main.typ imports it by default; Insert → Physics adds it if missing)
+    { label: 'dv', insertText: 'dv(${1:f}, ${2:x})', documentation: 'df/dx — total derivative (physica).', detail: 'physica' },
+    { label: 'pdv', insertText: 'pdv(${1:f}, ${2:x})', documentation: '∂f/∂x — partial derivative (physica).', detail: 'physica' },
+    { label: 'dd', insertText: 'dd(${1:x})', documentation: 'Differential dx (upright d) (physica).', detail: 'physica' },
+    { label: 'va', insertText: 'va(${1:a})', documentation: 'Vector with arrow (physica).', detail: 'physica' },
+    { label: 'vb', insertText: 'vb(${1:a})', documentation: 'Bold vector (physica).', detail: 'physica' },
+    { label: 'vu', insertText: 'vu(${1:a})', documentation: 'Unit vector with hat (physica).', detail: 'physica' },
+    { label: 'grad', insertText: 'grad ${1:phi}', documentation: '∇ gradient (physica).', detail: 'physica' },
+    { label: 'div-op', insertText: 'div va(${1:E})', documentation: '∇· divergence (physica).', detail: 'physica' },
+    { label: 'curl', insertText: 'curl va(${1:B})', documentation: '∇× curl (physica).', detail: 'physica' },
+    { label: 'laplacian', insertText: 'laplacian ${1:phi}', documentation: '∇² Laplacian (physica).', detail: 'physica' },
+    { label: 'tensor', insertText: 'tensor(${1:T}, +${2:mu}, -${3:nu})', documentation: 'Tensor with staggered indices T^μ_ν (physica).', detail: 'physica' },
+    { label: 'bra', insertText: 'bra(${1:psi})', documentation: '⟨ψ| (physica).', detail: 'physica' },
+    { label: 'ket', insertText: 'ket(${1:psi})', documentation: '|ψ⟩ (physica).', detail: 'physica' },
+    { label: 'braket', insertText: 'braket(${1:psi}, ${2:phi})', documentation: '⟨ψ|φ⟩ inner product (physica).', detail: 'physica' },
+    { label: 'ketbra', insertText: 'ketbra(${1:psi}, ${2:phi})', documentation: '|ψ⟩⟨φ| outer product (physica).', detail: 'physica' },
+    { label: 'expval', insertText: 'expval(${1:hat(A)})', documentation: '⟨A⟩ expectation value (physica).', detail: 'physica' },
+    { label: 'mel', insertText: 'mel(${1:n}, ${2:hat(A)}, ${3:m})', documentation: '⟨n|A|m⟩ matrix element (physica).', detail: 'physica' },
+    { label: 'commutator', insertText: '[${1:hat(x)}, ${2:hat(p)}]', documentation: '[A, B] commutator (plain brackets).', detail: 'Math' },
+    { label: 'anticommutator', insertText: '{${1:A}, ${2:B}}', documentation: '{A, B} anticommutator (plain braces).', detail: 'Math' },
+    { label: 'order', insertText: 'order(${1:x^2})', documentation: '𝒪(x²) big-O (physica).', detail: 'physica' },
+    { label: 'evaluated', insertText: 'evaluated(${1:f(x)})_(${2:0})^(${3:1})', documentation: 'Expression evaluated at bounds (physica).', detail: 'physica' },
+    { label: 'isotope', insertText: 'isotope(${1:"U"}, a: ${2:235}, z: ${3:92})', documentation: 'Isotope notation (physica).', detail: 'physica' },
+  ];
+  // Inside $...$? Count unescaped dollars before the cursor.
+  const inMathMode = (model: any, position: any) => {
+    const before = model.getValueInRange({ startLineNumber: 1, startColumn: 1, endLineNumber: position.lineNumber, endColumn: position.column });
+    return ((before.match(/(?<!\\)\$/g) || []).length % 2) === 1;
+  };
+  monacoInstance.languages.registerCompletionItemProvider(languageId, {
+    provideCompletionItems: (model: any, position: any) => {
+      if (!inMathMode(model, position)) return { suggestions: [] };
+      const K = monacoInstance.languages.CompletionItemKind;
+      const greek = GREEK.map(([name, glyph]) => ({
+        label: `${name} ${glyph}`, filterText: name, insertText: name, kind: K.Constant,
+        detail: glyph, documentation: `Greek letter ${glyph}`, sortText: '1' + name,
+      }));
+      const syms = MATH_SYMS.map(([name, doc]) => ({
+        label: `${name} ${doc.split(' ')[0]}`, filterText: name, insertText: name, kind: K.Constant,
+        detail: doc.split(' ')[0], documentation: doc, sortText: '2' + name,
+      }));
+      const fns = MATH_FNS.map(f => ({
+        ...f, kind: K.Function, insertTextRules: SNIPPET_RULE, sortText: '0' + f.label,
+      }));
+      return { suggestions: [...fns, ...greek, ...syms] };
+    },
+  });
+  for (const [name, glyph] of [...GREEK, ...MATH_SYMS])
+    if (!DOCS.has(name)) DOCS.set(name, { doc: `Math symbol ${glyph}`, detail: 'Math symbol', insert: name });
+  for (const f of MATH_FNS)
+    if (!DOCS.has(f.label)) DOCS.set(f.label, { doc: f.documentation, detail: f.detail, insert: f.insertText });
+
   // Cross-reference autocomplete: when typing `@`, suggest labels (`<...>`)
   // that already exist in the document.
   monacoInstance.languages.registerCompletionItemProvider(languageId, {

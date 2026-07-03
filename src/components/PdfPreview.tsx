@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { TextLayer } from 'pdfjs-dist';
 
@@ -7,7 +7,9 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mi
 const DPR = Math.min(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1, 2);
 const PRESETS = [50, 75, 90, 100, 110, 125, 150, 200, 300];
 
-export default function PdfPreview({ url, onWordClick }: { url: string, onWordClick: (word: string, context?: string) => void }) {
+// memo: the app re-renders on every keystroke; the preview only cares about `url`
+// (and onWordClick is a stable useCallback), so skip those renders entirely.
+function PdfPreview({ url, onWordClick }: { url: string, onWordClick: (word: string, context?: string) => void }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pagesRef = useRef<HTMLDivElement | null>(null);
   const renderTokenRef = useRef(0);
@@ -153,3 +155,5 @@ export default function PdfPreview({ url, onWordClick }: { url: string, onWordCl
     </div>
   );
 }
+
+export default memo(PdfPreview);

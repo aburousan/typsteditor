@@ -13,12 +13,12 @@ const CATEGORIES: Record<string, Sym[]> = {
     { char: 'ϕ', code: 'phi.alt' }, { char: 'χ', code: 'chi' }, { char: 'ψ', code: 'psi' }, { char: 'ω', code: 'omega' },
     { char: 'Γ', code: 'Gamma' }, { char: 'Δ', code: 'Delta' }, { char: 'Θ', code: 'Theta' }, { char: 'Λ', code: 'Lambda' },
     { char: 'Ξ', code: 'Xi' }, { char: 'Π', code: 'Pi' }, { char: 'Σ', code: 'Sigma' }, { char: 'Υ', code: 'Upsilon' },
-    { char: 'Φ', code: 'Phi' }, { char: 'Ψ', code: 'Psi' }, { char: 'Ω', code: 'Omega' }, { char: 'ℏ', code: 'planck.reduce' },
+    { char: 'Φ', code: 'Phi' }, { char: 'Ψ', code: 'Psi' }, { char: 'Ω', code: 'Omega' }, { char: 'ℏ', code: 'hbar' },
   ],
   Operators: [
     { char: '±', code: 'plus.minus' }, { char: '∓', code: 'minus.plus' }, { char: '×', code: 'times' }, { char: '÷', code: 'div' },
-    { char: '⋅', code: 'dot.c' }, { char: '∗', code: 'ast' }, { char: '∘', code: 'compose' }, { char: '⊕', code: 'plus.circle' },
-    { char: '⊗', code: 'times.circle' }, { char: '⊙', code: 'dot.circle' }, { char: '⋆', code: 'star.op' }, { char: '†', code: 'dagger' },
+    { char: '⋅', code: 'dot.c' }, { char: '∗', code: 'ast' }, { char: '∘', code: 'compose' }, { char: '⊕', code: 'plus.o' },
+    { char: '⊗', code: 'times.o' }, { char: '⊙', code: 'dot.o' }, { char: '⋆', code: 'star.op' }, { char: '†', code: 'dagger' },
     { char: '‡', code: 'dagger.double' }, { char: '∖', code: 'without' }, { char: '⌊⌋', code: 'floor(x)' }, { char: '⌈⌉', code: 'ceil(x)' },
   ],
   Relations: [
@@ -53,8 +53,8 @@ const CATEGORIES: Record<string, Sym[]> = {
   ],
   'Sets & Logic': [
     { char: '∈', code: 'in' }, { char: '∉', code: 'in.not' }, { char: '∋', code: 'in.rev' }, { char: '⊂', code: 'subset' },
-    { char: '⊆', code: 'subset.eq' }, { char: '⊃', code: 'supset' }, { char: '∪', code: 'union' }, { char: '∩', code: 'sect' },
-    { char: '⋃', code: 'union.big' }, { char: '⋂', code: 'sect.big' }, { char: '∀', code: 'forall' }, { char: '∃', code: 'exists' },
+    { char: '⊆', code: 'subset.eq' }, { char: '⊃', code: 'supset' }, { char: '∪', code: 'union' }, { char: '∩', code: 'inter' },
+    { char: '⋃', code: 'union.big' }, { char: '⋂', code: 'inter.big' }, { char: '∀', code: 'forall' }, { char: '∃', code: 'exists' },
     { char: '∄', code: 'exists.not' }, { char: '∅', code: 'emptyset' }, { char: '∧', code: 'and' }, { char: '∨', code: 'or' },
     { char: '¬', code: 'not' }, { char: '⊨', code: 'models' }, { char: '∴', code: 'therefore' }, { char: '∵', code: 'because' },
   ],

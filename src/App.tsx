@@ -17,6 +17,7 @@ import SaveAsModal from './components/SaveAsModal';
 import PdfPreview from './components/PdfPreview';
 // Loaded on demand: pulls in all of three.js, which nothing else needs.
 const Plot3DStudio = lazy(() => import('./components/Plot3DStudio'));
+const FeynmanBuilder = lazy(() => import('./components/FeynmanBuilder'));
 import SymbolDraw from './components/SymbolDraw';
 import RefManager from './components/RefManager';
 import BibManager from './components/BibManager';
@@ -84,7 +85,7 @@ const DEFAULT_CODE = `#set page(paper: "a4")
 #set math.equation(numbering: "(1)")
 
 #import "@preview/cetz:0.3.4"
-#import "@preview/physica:0.9.5": *
+#import "@preview/physica:0.9.8": *
 
 = Typst with Physics and CeTZ!
 
@@ -110,8 +111,8 @@ const LATEX_FN: Record<string, string> = {
 };
 const LATEX_SYM: Record<string, string> = {
   bullet: 'bullet', circ: 'compose', cdot: 'dot.op', ast: 'ast', star: 'star',
-  times: 'times', otimes: 'times.circle', oplus: 'plus.circle', ominus: 'minus.circle',
-  odot: 'dot.circle', pm: 'plus.minus', mp: 'minus.plus', div: 'div',
+  times: 'times', otimes: 'times.o', oplus: 'plus.o', ominus: 'minus.o',
+  odot: 'dot.o', pm: 'plus.minus', mp: 'minus.plus', div: 'div',
   to: 'arrow.r', rightarrow: 'arrow.r', longrightarrow: 'arrow.r.long', leftarrow: 'arrow.l',
   longleftarrow: 'arrow.l.long', leftrightarrow: 'arrow.l.r', Rightarrow: 'arrow.r.double',
   Leftarrow: 'arrow.l.double', Leftrightarrow: 'arrow.l.r.double', mapsto: 'arrow.r.bar',
@@ -119,17 +120,17 @@ const LATEX_SYM: Record<string, string> = {
   twoheadrightarrow: 'arrow.r.twohead', rightharpoonup: 'harpoon.rt', uparrow: 'arrow.t',
   downarrow: 'arrow.b', Uparrow: 'arrow.t.double', Downarrow: 'arrow.b.double',
   nearrow: 'arrow.tr', searrow: 'arrow.br', swarrow: 'arrow.bl', nwarrow: 'arrow.tl',
-  infty: 'infinity', partial: 'diff', emptyset: 'nothing', varnothing: 'nothing',
+  infty: 'infinity', partial: 'partial', emptyset: 'nothing', varnothing: 'nothing',
   setminus: 'without', subseteq: 'subset.eq', supseteq: 'supset.eq', notin: 'in.not',
-  ni: 'in.rev', cup: 'union', cap: 'sect', bigcup: 'union.big', bigcap: 'sect.big',
+  ni: 'in.rev', cup: 'union', cap: 'inter', bigcup: 'union.big', bigcap: 'inter.big',
   wedge: 'and', vee: 'or', lnot: 'not', neg: 'not',
   neq: 'eq.not', ne: 'eq.not', leq: 'lt.eq', le: 'lt.eq', geq: 'gt.eq', ge: 'gt.eq',
   ll: 'lt.double', gg: 'gt.double', cong: 'tilde.equiv', simeq: 'tilde.eq', sim: 'tilde.op',
-  propto: 'prop', langle: 'angle.l', rangle: 'angle.r',
+  propto: 'prop', langle: 'chevron.l', rangle: 'chevron.r',
   ldots: 'dots.h', cdots: 'dots.h.c', vdots: 'dots.v', ddots: 'dots.down',
-  hbar: 'planck.reduce', dagger: 'dagger', ddagger: 'dagger.double',
+  hbar: 'ℏ', dagger: 'dagger', ddagger: 'dagger.double',
   int: 'integral', oint: 'integral.cont', prod: 'product', coprod: 'product.co',
-  bigoplus: 'plus.circle.big', bigotimes: 'times.circle.big',
+  bigoplus: 'plus.o.big', bigotimes: 'times.o.big',
   varepsilon: 'epsilon.alt', varphi: 'phi.alt', vartheta: 'theta.alt', varrho: 'rho.alt',
   Box: 'square.stroked', perp: 'perp', parallel: 'parallel',
 };
@@ -145,6 +146,60 @@ export const latexMathToTypst = (s: string): string => {
   return out.replace(/\s+([_^])/g, '$1').replace(/\s{2,}/g, ' ').trim();
 };
 
+// Palette for the toolbar text-colour button.
+const TEXT_COLORS = ['#000000', '#64748b', '#ef4444', '#f97316', '#f59e0b', '#22c55e', '#14b8a6', '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899', '#b91c1c', '#166534', '#1e3a8a'];
+
+// --- File → Open Recent -------------------------------------------------------
+// Desktop entries store the absolute path; Chrome/Edge entries store the
+// FileSystemDirectoryHandle in IndexedDB (handles survive reloads there —
+// localStorage can't hold them). Metadata lives in localStorage.
+type RecentFolder = { name: string, path?: string, idb?: string, when: number };
+
+const idbOpen = (): Promise<IDBDatabase> => new Promise((res, rej) => {
+  const r = indexedDB.open('typst-editor', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('handles');
+  r.onsuccess = () => res(r.result);
+  r.onerror = () => rej(r.error);
+});
+const idbPut = async (key: string, val: any) => {
+  const d = await idbOpen();
+  return new Promise<void>((res, rej) => {
+    const t = d.transaction('handles', 'readwrite');
+    t.objectStore('handles').put(val, key);
+    t.oncomplete = () => res(); t.onerror = () => rej(t.error);
+  });
+};
+const idbGet = async (key: string) => {
+  const d = await idbOpen();
+  return new Promise<any>((res, rej) => {
+    const g = d.transaction('handles', 'readonly').objectStore('handles').get(key);
+    g.onsuccess = () => res(g.result); g.onerror = () => rej(g.error);
+  });
+};
+const shortenPath = (p: string) => {
+  const parts = p.replace(/[/\\]+$/, '').split(/[/\\]/);
+  return parts.length > 3 ? '…/' + parts.slice(-2).join('/') : p;
+};
+
+// Ready-made equations for HEP / GR / cosmology (Insert → Physics & Cosmology).
+// All symbol spellings are the long-standing ones so they compile on older CLIs;
+// entries marked physica get the import added automatically on insert.
+const PHYSICS_EQS: { group: string, name: string, physica?: boolean, code: string }[] = [
+  { group: 'Quantum', name: 'Bra–ket & expectation value', physica: true, code: 'braket(psi, phi), quad expval(hat(A)) = mel(psi, hat(A), psi)' },
+  { group: 'Quantum', name: 'Canonical commutators', physica: true, code: '[hat(x), hat(p)] = i hbar, quad {gamma^mu, gamma^nu} = 2 eta^(mu nu)' },
+  { group: 'Quantum', name: "Fermi's golden rule", physica: true, code: 'Gamma_(f i) = (2 pi)/hbar abs(mel(f, hat(H)\', i))^2 rho(E_f)' },
+  { group: 'HEP', name: 'Tensor indices & 4-gradient', physica: true, code: 'tensor(T, +mu, -nu), quad partial_mu = pdv(, x^mu)' },
+  { group: 'HEP', name: 'Gauge covariant derivative', code: 'D_mu = partial_mu - i g A_mu^a T^a' },
+  { group: 'HEP', name: 'Dirac equation', physica: true, code: '(i hbar gamma^mu partial_mu - m c) psi = 0' },
+  { group: 'HEP', name: 'Klein–Gordon equation', physica: true, code: '(square + (m^2 c^2)/hbar^2) phi = 0' },
+  { group: 'HEP', name: 'Feynman slash', code: 'cancel(D) = gamma^mu D_mu' },
+  { group: 'HEP', name: 'QED Lagrangian', code: 'cal(L)_"QED" = macron(psi) (i gamma^mu D_mu - m) psi - 1/4 F_(mu nu) F^(mu nu)' },
+  { group: 'GR & Cosmology', name: 'Einstein field equations', code: 'R_(mu nu) - 1/2 R g_(mu nu) + Lambda g_(mu nu) = (8 pi G)/c^4 T_(mu nu)' },
+  { group: 'GR & Cosmology', name: 'Christoffel symbols', code: 'Gamma^lambda_(mu nu) = 1/2 g^(lambda sigma) (partial_mu g_(nu sigma) + partial_nu g_(mu sigma) - partial_sigma g_(mu nu))' },
+  { group: 'GR & Cosmology', name: 'FRW metric', code: 'dif s^2 = -c^2 dif t^2 + a(t)^2 [ (dif r^2)/(1 - k r^2) + r^2 (dif theta^2 + sin^2 theta dif phi.alt^2) ]' },
+  { group: 'GR & Cosmology', name: 'Friedmann equations', code: '(dot(a)/a)^2 = (8 pi G)/3 rho - (k c^2)/a^2 + Lambda/3, quad dot(rho) = -3 H (rho + p/c^2)' },
+];
+
 export default function App() {
   const editorRef = useRef<any>(null);
   const [tabs, setTabs] = useState<Tab[]>([{ path: 'main.typ', content: DEFAULT_CODE, isDirty: true }]);
@@ -154,7 +209,27 @@ export default function App() {
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [isCompiling, setIsCompiling] = useState(false);
   const [errorLogs, setErrorLogs] = useState<string | null>(null);
-  const [theme, setTheme] = useState<'typst-dark' | 'typst-light'>('typst-dark');
+  const [theme, setTheme] = useState<'typst-dark' | 'typst-light'>(() =>
+    localStorage.getItem('editor_theme') === 'typst-light' ? 'typst-light' : 'typst-dark');
+  const [editorFontSize, setEditorFontSize] = useState<number>(() => Number(localStorage.getItem('editor_font_size')) || 14);
+  const [compileDelay, setCompileDelay] = useState<number>(() => Number(localStorage.getItem('compile_delay')) || 1000);
+  useEffect(() => { localStorage.setItem('editor_theme', theme); }, [theme]);
+  const [recentFolders, setRecentFolders] = useState<RecentFolder[]>(() => {
+    try { return JSON.parse(localStorage.getItem('recent_folders') || '[]'); } catch { return []; }
+  });
+  const addRecentFolder = (r: Omit<RecentFolder, 'when'>) => setRecentFolders(prev => {
+    const next = [{ ...r, when: Date.now() }, ...prev.filter(p => r.path ? p.path !== r.path : p.idb !== r.idb)].slice(0, 8);
+    localStorage.setItem('recent_folders', JSON.stringify(next));
+    return next;
+  });
+  const clearRecentFolders = () => { localStorage.removeItem('recent_folders'); setRecentFolders([]); };
+  const [textColor, setTextColor] = useState<string>(() => localStorage.getItem('text_color') || '#ef4444');
+  // Palette anchor (viewport coords). Position: fixed — the toolbar scrolls
+  // horizontally (overflow-x), which would clip an absolutely-positioned child.
+  const [colorPopAt, setColorPopAt] = useState<{ x: number, y: number } | null>(null);
+  useEffect(() => { localStorage.setItem('text_color', textColor); }, [textColor]);
+  useEffect(() => { localStorage.setItem('editor_font_size', String(editorFontSize)); }, [editorFontSize]);
+  useEffect(() => { localStorage.setItem('compile_delay', String(compileDelay)); }, [compileDelay]);
 
   const activeTab = tabs.find(t => t.path === activeTabPath);
   
@@ -170,6 +245,8 @@ export default function App() {
   const [showTemplateInstaller, setShowTemplateInstaller] = useState(false);
   const [showSymbolPicker, setShowSymbolPicker] = useState(false);
   const [showDiagramBuilder, setShowDiagramBuilder] = useState(false);
+  const [showFeynman, setShowFeynman] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [showFigureBuilder, setShowFigureBuilder] = useState(false);
   const [showQuiver, setShowQuiver] = useState(false);
   const [showEditSettings, setShowEditSettings] = useState(false);
@@ -346,16 +423,37 @@ export default function App() {
     }).catch(() => {});
   };
 
-  // Intercept Cmd/Ctrl+S so the browser "Save As" dialog never appears.
+  // Global shortcuts. Routed through a ref so the handler never captures stale
+  // state; ⌘S is intercepted so the browser "Save As" dialog never appears.
+  // ⌘B/⌘I/⌘E only fire inside the code editor (they'd be rude in modal inputs);
+  // the ⌘⇧ dialogs work anywhere except while typing in another field.
+  const shortcutRef = useRef<Record<string, () => void>>({});
+  shortcutRef.current = {
+    'S-e': () => insertNumberedEquation(),
+    'S-m': () => insertMatrix(),
+    'S-p': () => setShowSymbolPicker(true),
+    'S-f': () => setShowFeynman(true),
+    'S-k': () => setCodeRunner({ initialLang: 'python' }),
+    'S-u': () => computeSelection(),
+    'b': () => wrapSelection('*', '*'),
+    'i': () => wrapSelection('_', '_'),
+    'e': () => wrapSelection('$', '$'),
+  };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
-        e.preventDefault();
-        saveActiveFile();
-      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'n' || e.key === 'N')) {
-        e.preventDefault();
-        toggleNumberingRef.current();
-      }
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === 's' && !e.shiftKey) { e.preventDefault(); saveActiveFile(); return; }
+      if (key === 'n' && e.shiftKey) { e.preventDefault(); toggleNumberingRef.current(); return; }
+      const action = shortcutRef.current[`${e.shiftKey ? 'S-' : ''}${key}`];
+      if (!action) return;
+      const t = e.target as HTMLElement;
+      const inMonaco = !!t.closest?.('.monaco-editor');
+      const inField = !inMonaco && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+      if (inField) return;                    // don't hijack typing in dialogs
+      if (!e.shiftKey && !inMonaco) return;   // ⌘B/⌘I/⌘E are editor-only
+      e.preventDefault();
+      action();
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
@@ -367,10 +465,10 @@ export default function App() {
       const timeoutId = setTimeout(() => { 
         compileTypst(currentMain); 
         setLastCompiledPath(currentMain);
-      }, hasDirty ? 1000 : 50);
+      }, hasDirty ? compileDelay : 50);
       return () => clearTimeout(timeoutId);
     }
-  }, [tabs, compileTypst, currentMain, lastCompiledPath]);
+  }, [tabs, compileTypst, currentMain, lastCompiledPath, compileDelay]);
 
   const handleEditorChange = (value: string | undefined) => {
     if (value !== undefined && activeTabPath) {
@@ -562,36 +660,61 @@ export default function App() {
   // - Chrome/Edge → File System Access API: native picker + edits saved back to
   //   the real folder.
   // - Other browsers → folder picker that imports a working copy (no write-back).
+  // Desktop: repoint the backend at an absolute path (also used by Open Recent).
+  const openFolderPathAsRoot = async (folder: string) => {
+    try {
+      const res = await fetch(`${API}/workspace/root`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folder }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { alert(data.error || 'Could not open that folder.'); return; }
+      dirHandleRef.current = null;   // desktop backend edits the folder directly
+      const name = folder.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || 'Project';
+      await loadWorkspace(name);
+      addRecentFolder({ name, path: folder });
+    } catch { alert('Could not reach the local server.'); }
+  };
+
+  // Chrome/Edge: writable directory handle → edits reflect on disk (also used by
+  // Open Recent, where the handle comes back out of IndexedDB).
+  const openDirHandleAsRoot = async (dir: any, ask = true) => {
+    try {
+      if (dir.requestPermission && (await dir.requestPermission({ mode: 'readwrite' })) !== 'granted') {
+        alert('Write permission is needed so your edits save back to the folder.'); return;
+      }
+      if (ask && !confirm(`Open “${dir.name}” as the workspace? Your edits will be saved back to this folder on disk.`)) return;
+      await fetch(`${API}/workspace/clear`, { method: 'POST' });
+      dirHandleRef.current = dir;
+      await importDirHandle(dir, '');
+      await loadWorkspace(dir.name);
+      const key = `dir:${dir.name}`;
+      try { await idbPut(key, dir); addRecentFolder({ name: dir.name, idb: key }); } catch { /* recents are best-effort */ }
+    } catch { alert('Could not open that folder.'); }
+  };
+
+  const openRecentFolder = async (r: RecentFolder) => {
+    if (r.path) { await openFolderPathAsRoot(r.path); return; }
+    if (r.idb) {
+      try {
+        const h = await idbGet(r.idb);
+        if (!h) throw new Error('gone');
+        await openDirHandleAsRoot(h, false);
+      } catch { alert('Could not reopen this folder — open it once via File → Open Folder…'); }
+    }
+  };
+
   const openFolderAsRoot = async () => {
     const desktop = (window as any).desktop;
     if (desktop?.pickFolder) {
       const folder: string | null = await desktop.pickFolder();
       if (!folder || !folder.trim()) return;
-      try {
-        const res = await fetch(`${API}/workspace/root`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folder }) });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) { alert(data.error || 'Could not open that folder.'); return; }
-        dirHandleRef.current = null;   // desktop backend edits the folder directly
-        await loadWorkspace(folder.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || 'Project');
-      } catch { alert('Could not reach the local server.'); }
+      await openFolderPathAsRoot(folder);
       return;
     }
 
-    // Chrome/Edge: writable directory handle → edits reflect on disk.
     if ((window as any).showDirectoryPicker) {
       let dir: any;
       try { dir = await (window as any).showDirectoryPicker({ mode: 'readwrite' }); }
       catch { return; } // cancelled
-      try {
-        if (dir.requestPermission && (await dir.requestPermission({ mode: 'readwrite' })) !== 'granted') {
-          alert('Write permission is needed so your edits save back to the folder.'); return;
-        }
-        if (!confirm(`Open “${dir.name}” as the workspace? Your edits will be saved back to this folder on disk.`)) return;
-        await fetch(`${API}/workspace/clear`, { method: 'POST' });
-        dirHandleRef.current = dir;
-        await importDirHandle(dir, '');
-        await loadWorkspace(dir.name);
-      } catch { alert('Could not open that folder.'); }
+      await openDirHandleAsRoot(dir);
       return;
     }
 
@@ -1253,6 +1376,13 @@ export default function App() {
     setShowQuiver(false);
   };
 
+  // Insert a ready-made physics equation (Insert → Physics & Cosmology),
+  // pulling in physica when the snippet needs it.
+  const insertPhysicsEq = (eq: typeof PHYSICS_EQS[number]) => {
+    if (eq.physica) ensureRule('@preview/physica', '#import "@preview/physica:0.9.8": *');
+    insertCode(`\n$ ${eq.code} $\n\n`);
+  };
+
   // Ensure a multi-line preamble block exists once, at the top of the document.
   const ensureSetup = (marker: string, block: string) => {
     if (!activeTab || activeTab.content.includes(marker)) return;
@@ -1521,7 +1651,7 @@ export default function App() {
   // matched in the source and the editor jumps to it (best effort — works for
   // prose/headings; rendered math may not match the source token).
   const syncDecorations = useRef<string[]>([]);
-  const jumpToWord = (raw: string, context?: string) => {
+  const jumpToWord = useCallback((raw: string, context?: string) => {
     const editor = editorRef.current;
     const model = editor?.getModel();
     if (!editor || !model) return;
@@ -1562,7 +1692,7 @@ export default function App() {
     editor.focus();
     syncDecorations.current = editor.deltaDecorations(syncDecorations.current, [{ range: next.range, options: { inlineClassName: 'sync-flash' } }]);
     setTimeout(() => { if (editorRef.current) syncDecorations.current = editorRef.current.deltaDecorations(syncDecorations.current, []); }, 1300);
-  };
+  }, []);
 
   const renderTree = (nodes: FileNode[]) => {
     return nodes.map(node => (
@@ -1596,23 +1726,46 @@ export default function App() {
     e.stopPropagation();
     setActiveMenu(activeMenu === menuName ? null : menuName);
   };
+  // Native-menubar feel: once a menu is open, sliding along the bar switches menus.
+  const menuProps = (name: string) => ({
+    className: activeMenu === name ? 'menu-item open' : 'menu-item',
+    onClick: (e: React.MouseEvent) => toggleMenu(e, name),
+    onMouseEnter: () => { if (activeMenu && activeMenu !== name) setActiveMenu(name); },
+  });
 
   return (
-    <div className="app-container" onClick={() => setActiveMenu(null)}>
+    <div className="app-container" onClick={() => { setActiveMenu(null); setColorPopAt(null); }}>
       <header className="header">
         <div className="header-left">
-          <div className="logo" style={{ fontSize: '0.9rem', gap: '4px' }}>
+          <div className="logo logo-btn" style={{ fontSize: '0.9rem', gap: '4px' }} title="About Typst Editor" onClick={() => setShowAbout(true)}>
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="logoGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#a78bfa"/><stop offset="1" stopColor="#60a5fa"/></linearGradient></defs><path fillRule="evenodd" clipRule="evenodd" fill="url(#logoGrad)" d="M9.29289 1.29289C9.48043 1.10536 9.73478 1 10 1H18C19.6569 1 21 2.34315 21 4V9C21 9.55228 20.5523 10 20 10C19.4477 10 19 9.55228 19 9V4C19 3.44772 18.5523 3 18 3H11V8C11 8.55228 10.5523 9 10 9H5V20C5 20.5523 5.44772 21 6 21H10C10.5523 21 11 21.4477 11 22C11 22.5523 10.5523 23 10 23H6C4.34315 23 3 21.6569 3 20V8C3 7.73478 3.10536 7.48043 3.29289 7.29289L9.29289 1.29289ZM6.41421 7H9V4.41421L6.41421 7ZM11.2929 10.2929C11.63 9.95583 12.1581 9.90353 12.5547 10.1679C12.7377 10.29 13.138 10.4206 13.8692 10.5557C14.2116 10.619 14.5873 10.6773 15.0006 10.7413L15.0159 10.7436C15.42 10.8062 15.8556 10.8736 16.3008 10.9531C18.0592 11.2671 20.2179 11.8037 21.7071 13.2929C22.907 14.4928 23.2701 15.7765 23.1846 16.8892C23.1413 17.4519 22.9841 17.9568 22.7829 18.3687L23 18.5858C23.781 19.3668 23.781 20.6332 23 21.4142L21.4142 23C20.6332 23.781 19.3668 23.781 18.5858 23L18.3687 22.7829C17.9568 22.9841 17.4519 23.1413 16.8892 23.1846C15.7765 23.2701 14.4928 22.907 13.2929 21.7071C11.8037 20.2179 11.2671 18.0592 10.9531 16.3008C10.8736 15.8556 10.8062 15.42 10.7436 15.0159L10.7413 15.0006C10.6773 14.5873 10.619 14.2116 10.5557 13.8692C10.4206 13.138 10.29 12.7377 10.1679 12.5547C9.90353 12.1581 9.95583 11.63 10.2929 11.2929L10.7926 10.7931L10.7929 10.7929L11.2929 10.2929ZM15.0677 16.482L12.6124 14.0266C12.6482 14.2458 12.683 14.47 12.7177 14.6947L12.7186 14.7006L12.7187 14.7007C12.7821 15.1107 12.8465 15.527 12.9219 15.9492C13.2329 17.6908 13.6963 19.2821 14.7071 20.2929C15.5072 21.093 16.2235 21.2299 16.7358 21.1904C17.3109 21.1462 17.7121 20.8737 17.7929 20.7929C18.1834 20.4024 18.8166 20.4024 19.2071 20.7929L20 21.5858L21.5858 20L20.7929 19.2071C20.6054 19.0196 20.5 18.7652 20.5 18.5C20.5 18.2348 20.6054 17.9804 20.7929 17.7929C20.8737 17.7121 21.1462 17.3109 21.1904 16.7358C21.2299 16.2235 21.093 15.5072 20.2929 14.7071C19.2821 13.6963 17.6908 13.2329 15.9492 12.9219C15.527 12.8465 15.1107 12.7821 14.7007 12.7187L14.7006 12.7186L14.6947 12.7177C14.47 12.683 14.2458 12.6482 14.0266 12.6124L16.482 15.0677C16.6472 15.0236 16.8208 15 17 15C18.1046 15 19 15.8954 19 17C19 18.1046 18.1046 19 17 19C15.8954 19 15 18.1046 15 17C15 16.8208 15.0236 16.6472 15.0677 16.482Z"/></svg>
             TypstEditor
           </div>
           <div className="menu-bar">
-            <div className="menu-item" onClick={(e) => toggleMenu(e, 'file')}>
+            <div {...menuProps('file')}>
               File
               {activeMenu === 'file' && (
                 <div className="dropdown">
                   <div className="dropdown-item" onClick={createNewFile}>New File...</div>
                   <div className="dropdown-item" onClick={() => { openFromDisk(); setActiveMenu(null); }}>Open File...</div>
                   <div className="dropdown-item" onClick={() => { openFolderAsRoot(); setActiveMenu(null); }}>Open Folder... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.72rem' }}>as workspace</span></div>
+                  <div className="dropdown-item has-submenu">
+                    <span>Open Recent</span><span className="submenu-arrow">›</span>
+                    <div className="submenu">
+                      {recentFolders.length === 0 && <div className="dropdown-item" style={{ opacity: 0.5, cursor: 'default' }} onClick={e => e.stopPropagation()}>No recent folders yet</div>}
+                      {recentFolders.map(r => (
+                        <div className="dropdown-item" key={(r.path ?? r.idb) + String(r.when)} onClick={() => { openRecentFolder(r); setActiveMenu(null); }}>
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                          {r.name}
+                          <span style={{ marginLeft: 'auto', opacity: 0.45, fontSize: '0.7rem' }}>{r.path ? shortenPath(r.path) : 'this browser'}</span>
+                        </div>
+                      ))}
+                      {recentFolders.length > 0 && <>
+                        <div className="dropdown-divider"></div>
+                        <div className="dropdown-item" onClick={() => { clearRecentFolders(); setActiveMenu(null); }}>Clear Recently Opened</div>
+                      </>}
+                    </div>
+                  </div>
                   <div className="dropdown-item" onClick={() => { openFolderFromDisk(); setActiveMenu(null); }}>Import Folder into Project...</div>
                   <div className="dropdown-item" onClick={() => setShowTemplateInstaller(true)}>New from Template...</div>
                   <div className="dropdown-divider"></div>
@@ -1621,7 +1774,7 @@ export default function App() {
                 </div>
               )}
             </div>
-            <div className="menu-item" onClick={(e) => toggleMenu(e, 'edit')}>
+            <div {...menuProps('edit')}>
               Edit
               {activeMenu === 'edit' && (
                 <div className="dropdown">
@@ -1637,7 +1790,7 @@ export default function App() {
                 </div>
               )}
             </div>
-            <div className="menu-item" onClick={(e) => toggleMenu(e, 'insert')}>
+            <div {...menuProps('insert')}>
               Insert
               {activeMenu === 'insert' && (
                 <div className="dropdown">
@@ -1655,17 +1808,30 @@ export default function App() {
                   <div className="dropdown-item has-submenu">
                     <span>Math</span><span className="submenu-arrow">›</span>
                     <div className="submenu">
-                      <div className="dropdown-item" onClick={() => { wrapSelection('$', '$'); setActiveMenu(null); }}>Inline Equation</div>
+                      <div className="dropdown-item" onClick={() => { wrapSelection('$', '$'); setActiveMenu(null); }}>Inline Equation <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘E</span></div>
                       <div className="dropdown-item" onClick={() => { insertCode('\n$ E = m c^2 $\n\n'); setActiveMenu(null); }}>Block Equation</div>
                       <div className="dropdown-item" onClick={() => { insertMultilineEquation(); setActiveMenu(null); }}>Multiline / Aligned Equation</div>
-                      <div className="dropdown-item" onClick={() => { insertNumberedEquation(); setActiveMenu(null); }}>Numbered Equation...</div>
-                      <div className="dropdown-item" onClick={() => { insertMatrix(); setActiveMenu(null); }}>Matrix (delimiters, lines, colour)...</div>
+                      <div className="dropdown-item" onClick={() => { insertNumberedEquation(); setActiveMenu(null); }}>Numbered Equation... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧E</span></div>
+                      <div className="dropdown-item" onClick={() => { insertMatrix(); setActiveMenu(null); }}>Matrix (delimiters, lines, colour)... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧M</span></div>
                       <div className="dropdown-item" onClick={() => { insertCases(); setActiveMenu(null); }}>Conditional / Piecewise (cases)...</div>
                       <div className="dropdown-item" onClick={() => { insertBrace(); setActiveMenu(null); }}>Over / Under Brace...</div>
                       <div className="dropdown-item" onClick={() => { insertCancel(); setActiveMenu(null); }}>Cancel / Strike Term...</div>
-                      <div className="dropdown-item" onClick={() => { setShowSymbolPicker(true); setActiveMenu(null); }}>Math &amp; Physics Symbols...</div>
+                      <div className="dropdown-item" onClick={() => { setShowSymbolPicker(true); setActiveMenu(null); }}>Math &amp; Physics Symbols... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧P</span></div>
                       <div className="dropdown-item" onClick={() => { setShowSymbolDraw(true); setActiveMenu(null); }}>Draw a Symbol → Typst (experimental)...</div>
-                      <div className="dropdown-item" onClick={() => { computeSelection(); setActiveMenu(null); }}>Compute Selection (simplify / solve)...</div>
+                      <div className="dropdown-item" onClick={() => { computeSelection(); setActiveMenu(null); }}>Compute Selection (simplify / solve)... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧U</span></div>
+                    </div>
+                  </div>
+                  <div className="dropdown-item has-submenu">
+                    <span>Physics &amp; Cosmology</span><span className="submenu-arrow">›</span>
+                    <div className="submenu">
+                      {PHYSICS_EQS.map((eq, i) => (
+                        <React.Fragment key={eq.name}>
+                          {i > 0 && PHYSICS_EQS[i - 1].group !== eq.group && <div className="dropdown-divider"></div>}
+                          <div className="dropdown-item" onClick={() => { insertPhysicsEq(eq); setActiveMenu(null); }}>
+                            {eq.name} <span style={{ marginLeft: 'auto', opacity: 0.45, fontSize: '0.72rem' }}>{eq.group}</span>
+                          </div>
+                        </React.Fragment>
+                      ))}
                     </div>
                   </div>
                   <div className="dropdown-item has-submenu">
@@ -1693,12 +1859,13 @@ export default function App() {
                       <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'python', initialCode: SURFACE_3D_TEMPLATE }); setActiveMenu(null); }}>3D Surface (Python/matplotlib)...</div>
                       <div className="dropdown-item" onClick={() => { setShowPlot3D(true); setActiveMenu(null); }}>3D Plot Studio (rotate &amp; pick view)...</div>
                       <div className="dropdown-item" onClick={() => { setShowQuiver(true); setActiveMenu(null); }}>Commutative Diagram (quiver)...</div>
+                      <div className="dropdown-item" onClick={() => { setShowFeynman(true); setActiveMenu(null); }}>Feynman Diagram (visual)... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧F</span></div>
                     </div>
                   </div>
                   <div className="dropdown-item has-submenu">
                     <span>Compute</span><span className="submenu-arrow">›</span>
                     <div className="submenu">
-                      <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'python' }); setActiveMenu(null); }}>Run Python...</div>
+                      <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'python' }); setActiveMenu(null); }}>Run Python... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧K</span></div>
                       <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'julia' }); setActiveMenu(null); }}>Run Julia...</div>
                       <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'wolfram' }); setActiveMenu(null); }}>Run Wolfram...</div>
                     </div>
@@ -1717,12 +1884,12 @@ export default function App() {
                 </div>
               )}
             </div>
-            <div className="menu-item" onClick={(e) => toggleMenu(e, 'formatting')}>
+            <div {...menuProps('formatting')}>
               Formatting
               {activeMenu === 'formatting' && (
                 <div className="dropdown">
-                  <div className="dropdown-item" onClick={() => { wrapSelection('*', '*'); setActiveMenu(null); }}>Bold</div>
-                  <div className="dropdown-item" onClick={() => { wrapSelection('_', '_'); setActiveMenu(null); }}>Italic</div>
+                  <div className="dropdown-item" onClick={() => { wrapSelection('*', '*'); setActiveMenu(null); }}>Bold <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘B</span></div>
+                  <div className="dropdown-item" onClick={() => { wrapSelection('_', '_'); setActiveMenu(null); }}>Italic <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘I</span></div>
                   <div className="dropdown-item" onClick={() => { wrapSelection('#super[', ']'); setActiveMenu(null); }}>Superscript</div>
                   <div className="dropdown-item" onClick={() => { wrapSelection('#sub[', ']'); setActiveMenu(null); }}>Subscript</div>
                   <div className="dropdown-divider"></div>
@@ -1738,7 +1905,7 @@ export default function App() {
                 </div>
               )}
             </div>
-            <div className="menu-item" onClick={(e) => toggleMenu(e, 'packages')}>
+            <div {...menuProps('packages')}>
               Packages
               {activeMenu === 'packages' && (
                 <div className="dropdown">
@@ -1768,9 +1935,12 @@ export default function App() {
         )}
 
         <div className="header-right">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', cursor: 'pointer', opacity: 0.8 }} onClick={() => setTheme(t => t === 'typst-dark' ? 'typst-light' : 'typst-dark')} title="Code editor theme (the PDF preview has its own dark toggle)">
-            {theme === 'typst-dark' ? '🌙 Editor' : '☀️ Editor'}
-          </div>
+          <button className="theme-toggle" onClick={() => setTheme(t => t === 'typst-dark' ? 'typst-light' : 'typst-dark')}
+            title={theme === 'typst-dark' ? 'Editor theme: dark — click for light (the PDF preview has its own toggle)' : 'Editor theme: light — click for dark (the PDF preview has its own toggle)'}>
+            {theme === 'typst-dark'
+              ? <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+              : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="M4.93 4.93l1.41 1.41"></path><path d="M17.66 17.66l1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="M4.93 19.07l1.41-1.41"></path><path d="M17.66 6.34l1.41-1.41"></path></svg>}
+          </button>
           <div style={{ opacity: 0.8, display: 'flex', alignItems: 'center' }} title="Words / Characters">
             {stats.words} Words
           </div>
@@ -1798,7 +1968,32 @@ export default function App() {
           <button className="tool-btn" onClick={() => wrapSelection('*', '*')} title="Bold"><b>B</b></button>
           <button className="tool-btn" onClick={() => wrapSelection('_', '_')} title="Italic"><i>I</i></button>
           <button className="tool-btn" onClick={() => wrapSelection('#underline[', ']')} title="Underline"><u>U</u></button>
-          <button className="tool-btn" onClick={() => wrapSelection('#text(fill: red)[', ']')} title="Text Color"><span style={{color:'#ef4444'}}>A</span></button>
+          <button className="tool-btn" title="Text colour — pick a colour to apply to the selection"
+            onClick={(e) => {
+              e.stopPropagation();
+              const r = e.currentTarget.getBoundingClientRect();
+              setColorPopAt(p => p ? null : { x: r.left, y: r.bottom + 6 });
+            }}>
+            <span style={{ color: textColor, borderBottom: `2.5px solid ${textColor}`, lineHeight: 1.05 }}>A</span>
+            <span style={{ fontSize: 8, opacity: 0.7, marginLeft: 1 }}>▾</span>
+          </button>
+          {colorPopAt && (
+            <div className="color-pop" style={{ position: 'fixed', left: colorPopAt.x, top: colorPopAt.y }} onClick={e => e.stopPropagation()}>
+              {TEXT_COLORS.map(c => (
+                <button key={c} className="color-swatch" style={{ background: c, boxShadow: c === textColor ? '0 0 0 2px var(--accent)' : 'none' }}
+                  onClick={() => { setTextColor(c); setColorPopAt(null); wrapSelection(`#text(fill: rgb("${c}"))[`, ']'); }} title={`Colour the selection ${c}`} />
+              ))}
+              <label className="color-swatch color-custom" title="Pick a custom colour, then Apply below">
+                <input type="color" value={textColor} onChange={e => setTextColor(e.target.value)} />
+                <span>+</span>
+              </label>
+              <button className="color-more color-apply" title={`Apply ${textColor} to the selection`}
+                onClick={() => { setColorPopAt(null); wrapSelection(`#text(fill: rgb("${textColor}"))[`, ']'); }}>
+                <span className="color-chip" style={{ background: textColor }}></span> Apply to selection
+              </button>
+              <button className="color-more" onClick={() => { setColorPopAt(null); insertTextColor(); }}>Full colour grid…</button>
+            </div>
+          )}
           <button className="tool-btn" onClick={() => wrapSelection('#super[', ']')} title="Superscript">x²</button>
           <button className="tool-btn" onClick={() => wrapSelection('#sub[', ']')} title="Subscript">x₂</button>
           <button className="tool-btn" onClick={insertWebLink} title="Insert Web Link"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></button>
@@ -1988,7 +2183,7 @@ export default function App() {
                   wordWrap: 'on',
                   // Only offer our Typst completions — no generic word/HTML noise.
                   wordBasedSuggestions: 'off',
-                  fontSize: 14,
+                  fontSize: editorFontSize,
                   lineNumbers: 'on',
                   scrollBeyondLastLine: false,
                   smoothScrolling: true,
@@ -2034,10 +2229,32 @@ export default function App() {
       }} />}
       {showTemplateInstaller && <TemplateInstaller onClose={() => setShowTemplateInstaller(false)} onInsert={handleInitTemplate} />}
       {showDiagramBuilder && <DiagramBuilder onClose={() => setShowDiagramBuilder(false)} onInsert={(code) => { insertCode(code); setShowDiagramBuilder(false); }} />}
+      {showFeynman && <Suspense fallback={null}><FeynmanBuilder onClose={() => setShowFeynman(false)} onInsert={(code) => { insertCode(code); setShowFeynman(false); }} /></Suspense>}
+      {showAbout && (
+        <div className="modal-overlay" onClick={() => setShowAbout(false)}>
+          <div className="modal-content about-modal" onClick={e => e.stopPropagation()}>
+            <svg width="52" height="52" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="aboutGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#a78bfa"/><stop offset="1" stopColor="#60a5fa"/></linearGradient></defs><path fillRule="evenodd" clipRule="evenodd" fill="url(#aboutGrad)" d="M9.29289 1.29289C9.48043 1.10536 9.73478 1 10 1H18C19.6569 1 21 2.34315 21 4V9C21 9.55228 20.5523 10 20 10C19.4477 10 19 9.55228 19 9V4C19 3.44772 18.5523 3 18 3H11V8C11 8.55228 10.5523 9 10 9H5V20C5 20.5523 5.44772 21 6 21H10C10.5523 21 11 21.4477 11 22C11 22.5523 10.5523 23 10 23H6C4.34315 23 3 21.6569 3 20V8C3 7.73478 3.10536 7.48043 3.29289 7.29289L9.29289 1.29289ZM6.41421 7H9V4.41421L6.41421 7ZM11.2929 10.2929C11.63 9.95583 12.1581 9.90353 12.5547 10.1679C12.7377 10.29 13.138 10.4206 13.8692 10.5557C14.2116 10.619 14.5873 10.6773 15.0006 10.7413L15.0159 10.7436C15.42 10.8062 15.8556 10.8736 16.3008 10.9531C18.0592 11.2671 20.2179 11.8037 21.7071 13.2929C22.907 14.4928 23.2701 15.7765 23.1846 16.8892C23.1413 17.4519 22.9841 17.9568 22.7829 18.3687L23 18.5858C23.781 19.3668 23.781 20.6332 23 21.4142L21.4142 23C20.6332 23.781 19.3668 23.781 18.5858 23L18.3687 22.7829C17.9568 22.9841 17.4519 23.1413 16.8892 23.1846C15.7765 23.2701 14.4928 22.907 13.2929 21.7071C11.8037 20.2179 11.2671 18.0592 10.9531 16.3008C10.8736 15.8556 10.8062 15.42 10.7436 15.0159L10.7413 15.0006C10.6773 14.5873 10.619 14.2116 10.5557 13.8692C10.4206 13.138 10.29 12.7377 10.1679 12.5547C9.90353 12.1581 9.95583 11.63 10.2929 11.2929L10.7926 10.7931L10.7929 10.7929L11.2929 10.2929ZM15.0677 16.482L12.6124 14.0266C12.6482 14.2458 12.683 14.47 12.7177 14.6947L12.7186 14.7006L12.7187 14.7007C12.7821 15.1107 12.8465 15.527 12.9219 15.9492C13.2329 17.6908 13.6963 19.2821 14.7071 20.2929C15.5072 21.093 16.2235 21.2299 16.7358 21.1904C17.3109 21.1462 17.7121 20.8737 17.7929 20.7929C18.1834 20.4024 18.8166 20.4024 19.2071 20.7929L20 21.5858L21.5858 20L20.7929 19.2071C20.6054 19.0196 20.5 18.7652 20.5 18.5C20.5 18.2348 20.6054 17.9804 20.7929 17.7929C20.8737 17.7121 21.1462 17.3109 21.1904 16.7358C21.2299 16.2235 21.093 15.5072 20.2929 14.7071C19.2821 13.6963 17.6908 13.2329 15.9492 12.9219C15.527 12.8465 15.1107 12.7821 14.7007 12.7187L14.7006 12.7186L14.6947 12.7177C14.47 12.683 14.2458 12.6482 14.0266 12.6124L16.482 15.0677C16.6472 15.0236 16.8208 15 17 15C18.1046 15 19 15.8954 19 17C19 18.1046 18.1046 19 17 19C15.8954 19 15 18.1046 15 17C15 16.8208 15.0236 16.6472 15.0677 16.482Z"/></svg>
+            <h2 style={{ margin: '10px 0 2px' }}>Typst Editor</h2>
+            <div className="about-version">Version {__APP_VERSION__}</div>
+            <div className="about-author">Created by <a href="https://rousan.netlify.app/" target="_blank" rel="noreferrer" style={{ color: 'inherit', fontWeight: 600, textDecoration: 'underline', textDecorationColor: 'var(--accent)' }}>Kazi Abu Rousan</a></div>
+            <div className="about-links">
+              <a href="https://github.com/aburousan/typsteditor" target="_blank" rel="noreferrer">GitHub</a>
+              <span>·</span>
+              <a href="https://typst.app" target="_blank" rel="noreferrer">Typst</a>
+              <span>·</span>
+              <span>MIT License</span>
+            </div>
+            <button className="btn-primary" style={{ marginTop: '16px' }} onClick={() => setShowAbout(false)}>OK</button>
+          </div>
+        </div>
+      )}
       {showFigureBuilder && <FigureBuilder onClose={() => setShowFigureBuilder(false)} onInsert={(code) => { insertCode(code); setShowFigureBuilder(false); }} />}
       {showEditSettings && <EditSettings onClose={() => setShowEditSettings(false)} editorRef={editorRef} monaco={monaco} />}
       {showDriveSync && <DriveSyncModal onClose={() => setShowDriveSync(false)} projectName={projectName} />}
-      {showAppSettings && <AppSettingsModal onClose={() => setShowAppSettings(false)} />}
+      {showAppSettings && <AppSettingsModal onClose={() => setShowAppSettings(false)}
+        theme={theme} onTheme={setTheme}
+        fontSize={editorFontSize} onFontSize={setEditorFontSize}
+        compileDelay={compileDelay} onCompileDelay={setCompileDelay} />}
       {showQuiver && <QuiverDiagram onClose={() => setShowQuiver(false)} onInsert={insertQuiverDiagram} />}
       {docPopup && (
         <>

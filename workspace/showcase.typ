@@ -4,7 +4,7 @@
 #set heading(numbering: "1.")
 #set math.equation(numbering: "(1)")
 
-#import "@preview/physica:0.9.5": *
+#import "@preview/physica:0.9.8": *
 #import "@preview/cetz:0.3.4": canvas, draw
 #import "@preview/cetz-plot:0.1.1": plot
 
