@@ -271,9 +271,12 @@ documents persist in the mounted `workspace/`. Keep the port on `127.0.0.1` only
 
 ## Troubleshooting
 
-- **macOS says the app is "damaged" or won't open** — it's ad-hoc signed but not
-  notarised. Right-click the app → **Open** (once), or run
-  `xattr -cr "/Applications/Hilbert.app"`.
+- **macOS says the app is "damaged" or won't open** — This is macOS Gatekeeper quarantining the app, or a broken signature from renaming the `.app` file. To fix it, run these two commands in your terminal:
+  ```bash
+  xattr -cr "/Applications/Hilbert.app"
+  codesign --force --deep --sign - "/Applications/Hilbert.app"
+  ```
+  *(If the app is in your Downloads folder, adjust the path accordingly).*
 - **Window is blank / "couldn't start its local engine"** — something else is
   using port 3001. Quit it and reopen.
 - **It opens but nothing compiles** — the **Typst CLI** isn't installed or isn't
