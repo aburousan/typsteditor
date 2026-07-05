@@ -47,6 +47,31 @@ result straight into the document.
 
 ![Dark PDF](docs/gifs/dark-pdf.gif)
 
+### Visual builders
+
+Point-and-click tools for the parts that are painful to hand-write. Each one
+generates editable Typst and drops it into your document.
+
+**Flowchart → Code.** Draw the logic and it writes the `while`, `if` and `for`
+for you:
+
+![Flowchart to code](docs/flowchart-code.png)
+
+**Feynman diagrams.** Draw propagators, loops and vertices, then get editable
+`cetz` back:
+
+![Feynman diagram builder](docs/feynman-builder.png)
+
+**Matrix Studio.** A visual grid with fills, borders, brackets and a code-array
+output mode:
+
+![Matrix Studio](docs/matrix-studio.png)
+
+**3D Plot Studio.** Rotate a surface to the angle you want, then insert that exact
+view:
+
+![3D Plot Studio](docs/plot3d-studio.png)
+
 > Everything happens on your computer. A tiny local Node server drives the Typst
 > compiler and (optional) code execution — nothing leaves the machine unless you
 > deliberately turn on Google Drive or WebDAV sync.
@@ -57,13 +82,21 @@ result straight into the document.
 - Live PDF preview that recompiles as you type, with zoom / fit-to-width and a
   dark mode. Double-click a word in the PDF to jump to it in the source (it uses
   the surrounding words to land on the right one).
-- Monaco editor with Typst highlighting, completions (including Greek letters,
-  physics symbols and `physica` functions inside `$…$`), `@`-reference
-  autocomplete, a file tree (files **and** folders, image upload), an outline, a
-  clickable **Problems** panel, and resizable panes.
+- Monaco editor with Typst highlighting, plus **hover documentation and smart
+  autocomplete powered by [tinymist](https://github.com/Myriad-Dreamin/tinymist)** —
+  hover any function for its signature and docs, and get completions for every
+  builtin, package export and label. On top of that: `@`-reference autocomplete,
+  **image-path autocomplete** inside `image("…")` (Overleaf-style, offered from
+  your workspace), a file tree (files **and** folders, image upload), an outline,
+  a clickable **Problems** panel, and resizable panes.
 - **Open Folder** works like VS Code — pick any folder as the workspace (edits
   save back to disk in the desktop app and Chrome/Edge) — with **File → Open
   Recent** to jump back to it later.
+- A **live word count of the rendered document** (read from the PDF, so `#set`,
+  `#import` and markup syntax don't inflate it), a one-click **highlighter** and a
+  **font-size dropdown** in the toolbar, and control-flow completions that offer
+  **both `{ }` code and `[ ]` content bodies** for `if` / `for` / `while` — the two
+  forms Typst actually allows.
 
 **Inserting the annoying stuff**
 - Title blocks, headings, abstracts; inline / block / aligned / **numbered**
@@ -93,6 +126,11 @@ result straight into the document.
 - **Compute on a selection**: highlight an expression and simplify / solve /
   differentiate / integrate / evaluate it with sympy, dropped back in as an
   equation.
+- **Ready-made physics examples** in the runner's *Examples* menu — including
+  **General Relativity with [xAct](http://www.xact.es/)** (Schwarzschild curvature
+  → Ricci tensor and the Kretschmann scalar), **Penrose (conformal) diagrams**,
+  and **Clebsch–Gordan / Wigner 3-j coefficients** — inserted either as a rendered
+  image or, in equation mode, as a typeset equation.
 
 **Plots**
 - 2D via `cetz` + `cetz-plot`.
@@ -107,6 +145,8 @@ result straight into the document.
 
 **Getting it in and out**
 - Import data (CSV / JSON / YAML / TOML) with the matching Typst reader wired up.
+- **Import your own fonts** (`.ttf` / `.otf`) via **File → Import Font** — they
+  drop into `workspace/fonts/` and compile with `#set text(font: "…")`.
 - Templates from Typst Universe with a rendered preview.
 - Git (init / commit / push to GitHub), and Save / Open / Export to PDF, HTML,
   `.typ`, a local folder, Google Drive, or WebDAV (Nextcloud / ownCloud).
@@ -117,6 +157,18 @@ result straight into the document.
 - **Node.js 18+**
 - **[Typst CLI](https://github.com/typst/typst) 0.14 or newer** on your `PATH`
   (`brew install typst`, `cargo install typst-cli`, or a release binary).
+- Optional but recommended — **[tinymist](https://github.com/Myriad-Dreamin/tinymist)**,
+  the Typst language server. With `tinymist` on your `PATH` the editor adds
+  **inline hover documentation** (hover any function for its signature and docs)
+  and **smart autocomplete** (builtins, package exports, labels). Without it the
+  editor still works fully — those two features simply stay quiet. Install it:
+  - **macOS:** `brew install tinymist`
+  - **Windows:** `winget install Myriad-Dreamin.tinymist` (or `scoop install tinymist`)
+  - **Linux:** `cargo install tinymist`, or download a prebuilt binary from the
+    [tinymist releases](https://github.com/Myriad-Dreamin/tinymist/releases) and
+    put it on your `PATH`
+  - **Any OS with Rust:** `cargo install tinymist` works everywhere. Verify with
+    `tinymist --version`, then restart the editor.
 - Optional, only for running code:
   - **Python 3** with `numpy`, `matplotlib`, `sympy`
   - **Julia** (`Latexify` for equation mode)
@@ -209,6 +261,8 @@ documents persist in the mounted `workspace/`. Keep the port on `127.0.0.1` only
 - **Cross-references**: add a label (`= Intro <sec:intro>`), then type `@` and pick it.
 - **Cite a paper**: Insert → References → Citations, look it up by DOI/arXiv, hit **Cite**.
 - **Compute**: select an expression, Insert → Math → Compute Selection.
+- **Quick formatting**: click **Aa** for a font-size dropdown, the highlighter for
+  a colour popover, and hover any Typst function to read its docs inline.
 
 ## Troubleshooting
 
@@ -252,6 +306,21 @@ OS-level isolation (a container or VM).
 Cloud credentials (Google Drive OAuth, WebDAV) live only in your browser's local
 storage — they're never committed or sent anywhere but the service you're syncing
 to. For Google Drive you supply your own OAuth Client ID in App Settings.
+
+## Feedback & updates
+
+A lot of the recent UI changes came from suggestions by friends who use the
+editor day to day. Thank you. If you want a feature or have an idea, open a
+[Discussion](https://github.com/aburousan/typsteditor/discussions); I read them
+and pick up what makes sense. I try to ship an update every couple of months,
+sooner if a serious bug turns up.
+
+## Support
+
+Built and maintained by [Kazi Abu Rousan](https://rousan.netlify.app/). If it
+saves you time, you can [**buy me a coffee**](https://buymeacoffee.com/rousan).
+It's genuinely appreciated and helps keep the project going. (There's also a
+button in the app's **About** dialog.)
 
 ## License
 

@@ -16,6 +16,7 @@ export default function Plot3DStudio({ onClose, onInsert }: { onClose: () => voi
   const mountRef = useRef<HTMLDivElement | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const rebuildRef = useRef<() => void>(() => {});
   const [expr, setExpr] = useState('np.sin(np.sqrt(X**2 + Y**2))');
   const [range, setRange] = useState('5');
@@ -42,6 +43,7 @@ export default function Plot3DStudio({ onClose, onInsert }: { onClose: () => voi
     // preserveDrawingBuffer lets us read the canvas back as a PNG on demand.
     try { renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true }); }
     catch { setErr('WebGL is not available in this browser.'); return; }
+    rendererRef.current = renderer;
     renderer.setSize(W, H);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     mount.appendChild(renderer.domElement);
@@ -53,11 +55,26 @@ export default function Plot3DStudio({ onClose, onInsert }: { onClose: () => voi
     scene.add(new THREE.AxesHelper(6));
 
     let mesh: THREE.Mesh | null = null;
+    // Free EVERY GPU resource on the old surface — its geometry AND material, plus
+    // the wireframe child's geometry and material. Disposing only mesh.geometry
+    // (as before) leaked a material + wireframe geometry + wireframe material on
+    // every rebuild; typing rebuilds per keystroke, so the leak piled up until the
+    // GPU driver dropped the context and the view crashed.
+    const disposeMesh = (m: THREE.Object3D | null) => {
+      if (!m) return;
+      scene.remove(m);
+      m.traverse((o: any) => {
+        if (o.geometry) o.geometry.dispose();
+        const mat = o.material;
+        if (Array.isArray(mat)) mat.forEach((x: any) => x.dispose());
+        else if (mat) mat.dispose();
+      });
+    };
     const build = () => {
       let f: (x: number, y: number) => number;
       try { f = new Function('x', 'y', 'return (' + toJs(exprRef.current) + ')') as any; if (!isFinite(f(0.3, 0.4))) throw 0; setErr(''); }
       catch { setErr('Invalid expression — use X, Y and np.* (e.g. np.sin(X)*np.cos(Y)).'); return; }
-      if (mesh) { scene.remove(mesh); (mesh.geometry as THREE.BufferGeometry).dispose(); }
+      disposeMesh(mesh);
       const R = Math.abs(parseFloat(rangeRef.current)) || 5, N = 60;
       const geo = new THREE.PlaneGeometry(2 * R, 2 * R, N, N);
       const pos = geo.attributes.position;
@@ -83,33 +100,79 @@ export default function Plot3DStudio({ onClose, onInsert }: { onClose: () => voi
     build();
 
     let raf = 0;
-    const loop = () => { controls.update(); renderer.render(scene, camera); raf = requestAnimationFrame(loop); };
+    let alive = true;
+    // If the browser drops the WebGL context (e.g. too many contexts, GPU reset),
+    // stop the loop and tell the user instead of throwing every frame / crashing.
+    const canvas = renderer.domElement;
+    const onContextLost = (e: Event) => {
+      e.preventDefault();
+      alive = false;
+      cancelAnimationFrame(raf);
+      setErr('The 3D graphics context was lost — close and reopen the 3D Plot Studio.');
+    };
+    canvas.addEventListener('webglcontextlost', onContextLost as EventListener, false);
+
+    const loop = () => {
+      if (!alive) return;
+      controls.update();
+      try { renderer.render(scene, camera); }
+      catch { alive = false; setErr('The 3D view stopped rendering — close and reopen the 3D Plot Studio.'); return; }
+      raf = requestAnimationFrame(loop);
+    };
     loop();
     const onResize = () => { const w = mount.clientWidth, h = mount.clientHeight; if (!w || !h) return; camera.aspect = w / h; camera.updateProjectionMatrix(); renderer.setSize(w, h); };
     const ro = new ResizeObserver(onResize); ro.observe(mount);
-    return () => { cancelAnimationFrame(raf); ro.disconnect(); controls.dispose(); renderer.dispose(); try { mount.removeChild(renderer.domElement); } catch {} };
+    return () => {
+      alive = false;
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      controls.dispose();
+      disposeMesh(mesh);
+      canvas.removeEventListener('webglcontextlost', onContextLost as EventListener);
+      // dispose() alone leaves the GPU context alive; forceContextLoss actually
+      // frees it so reopening the studio doesn't pile up contexts (~16 max).
+      try { renderer.forceContextLoss(); } catch {}
+      renderer.dispose();
+      rendererRef.current = null;
+      try { mount.removeChild(canvas); } catch {}
+    };
   }, []);
 
-  useEffect(() => { exprRef.current = expr; rangeRef.current = range; rebuildRef.current(); }, [expr, range]);
+  // Debounce the rebuild: typing fires onChange per keystroke, and each rebuild
+  // allocates/frees GPU geometry — rebuilding only after a ~200ms pause keeps the
+  // driver from thrashing (and the live preview still feels instant).
+  useEffect(() => {
+    exprRef.current = expr;
+    rangeRef.current = range;
+    const t = setTimeout(() => rebuildRef.current(), 200);
+    return () => clearTimeout(t);
+  }, [expr, range]);
 
   // Capture exactly what's on screen (WYSIWYG) at higher resolution, save it into
   // the workspace images/ folder, and insert a figure referencing it. No Python.
   const insert = async () => {
-    const scene = sceneRef.current, cam = cameraRef.current;
-    if (!scene || !cam) return;
+    const scene = sceneRef.current, cam = cameraRef.current, renderer = rendererRef.current;
+    if (!scene || !cam || !renderer) return;
     setSaving(true);
     try {
-      // Render the current scene/camera into an off-screen high-res buffer.
+      // Capture at higher resolution by momentarily resizing the EXISTING renderer
+      // (not a second WebGLRenderer — every extra context counts toward the browser's
+      // ~16-context limit and, once exceeded, the oldest is force-lost and the GPU
+      // process can crash). setSize(…, false) leaves the canvas CSS size untouched.
       const CW = 1600, CH = 1200;
-      const rt = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-      rt.setSize(CW, CH);
-      rt.setPixelRatio(1);
+      const prevSize = new THREE.Vector2();
+      renderer.getSize(prevSize);
+      const prevPixelRatio = renderer.getPixelRatio();
       const snapCam = cam.clone() as THREE.PerspectiveCamera;
       snapCam.aspect = CW / CH;
       snapCam.updateProjectionMatrix();
-      rt.render(scene, snapCam);
-      const dataUrl = rt.domElement.toDataURL('image/png');
-      rt.dispose();
+      renderer.setPixelRatio(1);
+      renderer.setSize(CW, CH, false);
+      renderer.render(scene, snapCam);
+      const dataUrl = renderer.domElement.toDataURL('image/png');
+      // Restore the on-screen size; the live loop resumes at the next frame.
+      renderer.setPixelRatio(prevPixelRatio);
+      renderer.setSize(prevSize.x, prevSize.y, false);
 
       const name = `images/surface3d-${Date.now().toString(36)}.png`;
       const res = await fetch(`${API}/workspace/save-image`, {

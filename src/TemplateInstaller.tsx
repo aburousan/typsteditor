@@ -46,6 +46,11 @@ export function TemplateInstaller({ onInsert, onClose }: TemplateInstallerProps)
     return () => { cancelled = true; };
   }, [selected]);
 
+  // Revoke the previous preview blob URL when it changes or the modal closes —
+  // the cleanup captures the prior value, so browsing templates doesn't pile up
+  // orphaned object URLs (each holds its PNG in memory).
+  useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
+
   const handleSearch = (e: React.FormEvent) => { e.preventDefault(); if (query.trim()) fetchPackages(query); };
 
   const handleInitTemplate = async (pkg: Template) => {

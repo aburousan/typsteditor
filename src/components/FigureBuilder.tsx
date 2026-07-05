@@ -10,7 +10,7 @@ export default function FigureBuilder({ onClose, onInsert }: { onClose: () => vo
   const handleInsert = () => {
     let code = '';
     if (alignCenter) code += '#align(center)[\n';
-    
+
     if (tab === 'figure') {
       code += `#figure(\n  image("path/to/image.png", width: 80%),\n  caption: [${caption}]\n)\n`;
     } else {
@@ -22,46 +22,60 @@ export default function FigureBuilder({ onClose, onInsert }: { onClose: () => vo
       gridCode += `  ),\n  caption: [${caption}]\n)\n`;
       code += gridCode;
     }
-    
+
     if (alignCenter) code += ']\n';
     onInsert(code);
   };
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" style={{ width: '400px' }} onClick={e => e.stopPropagation()}>
+      <div className="modal-content" style={{ width: 440, maxWidth: '95vw' }} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h2>Insert Figure</h2>
-          <button className="tab-close" style={{ fontSize: '24px', cursor: 'pointer' }} onClick={onClose}>×</button>
-        </div>
-        <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
-          {['figure', 'subfigure'].map(t => (
-            <button key={t} onClick={() => setTab(t as any)} style={{ background: tab === t ? 'var(--accent-color)' : 'var(--panel-bg)', padding: '5px 10px', borderRadius: '4px', cursor: 'pointer', border: 'none', color: '#fff' }}>
-              {t.charAt(0).toUpperCase() + t.slice(1)}
-            </button>
-          ))}
-        </div>
-        
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <label>Caption: <input type="text" value={caption} onChange={e => setCaption(e.target.value)} style={{ width: '100%', padding: '5px', background: 'var(--bg-color)', color: 'white' }} /></label>
-          
-          {tab === 'subfigure' && (
-            <>
-              <label>Columns: <input type="number" min="1" max="5" value={subCols} onChange={e => setSubCols(Number(e.target.value))} style={{ width: '100%', padding: '5px', background: 'var(--bg-color)', color: 'white' }} /></label>
-              <label>Rows: <input type="number" min="1" max="5" value={subRows} onChange={e => setSubRows(Number(e.target.value))} style={{ width: '100%', padding: '5px', background: 'var(--bg-color)', color: 'white' }} /></label>
-            </>
-          )}
+          <button className="close-btn" onClick={onClose}>×</button>
         </div>
 
-        <div style={{ marginTop: '15px' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#cbd5e1', cursor: 'pointer' }}>
-            <input type="checkbox" checked={alignCenter} onChange={e => setAlignCenter(e.target.checked)} />
-            Align Figure to Center
+        <div className="modal-body">
+          <div className="seg">
+            {(['figure', 'subfigure'] as const).map(t => (
+              <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
+                {t === 'figure' ? 'Single figure' : 'Subfigure grid'}
+              </button>
+            ))}
+          </div>
+
+          <label className="form-field">
+            <span>Caption</span>
+            <input type="text" value={caption} onChange={e => setCaption(e.target.value)} placeholder="Figure caption" />
           </label>
+
+          {tab === 'subfigure' && (
+            <div className="form-row">
+              <label className="form-field">
+                <span>Columns</span>
+                <input type="number" min={1} max={5} value={subCols} onChange={e => setSubCols(Number(e.target.value))} />
+              </label>
+              <label className="form-field">
+                <span>Rows</span>
+                <input type="number" min={1} max={5} value={subRows} onChange={e => setSubRows(Number(e.target.value))} />
+              </label>
+            </div>
+          )}
+
+          <label className="form-check">
+            <input type="checkbox" checked={alignCenter} onChange={e => setAlignCenter(e.target.checked)} />
+            Centre the figure on the page
+          </label>
+
+          <div className="form-hint">
+            Inserts a <code>#figure(...)</code> with an <code>image(...)</code> placeholder — point it at a file in
+            your project and add a <code>&lt;label&gt;</code> to cross-reference it.
+          </div>
         </div>
 
-        <div style={{ marginTop: '20px', textAlign: 'right' }}>
-          <button style={{ background: 'var(--accent-color)', color: 'white', padding: '8px 16px', borderRadius: '4px', border: 'none', cursor: 'pointer' }} onClick={handleInsert}>Insert Code</button>
+        <div className="modal-footer">
+          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" onClick={handleInsert}>Insert figure</button>
         </div>
       </div>
     </div>

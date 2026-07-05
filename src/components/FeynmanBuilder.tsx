@@ -8,7 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 // lines (so no deprecated `pattern`/`tiling` is needed).
 
 type Pt = { x: number, y: number };
-type EdgeKind = 'fermion' | 'antifermion' | 'photon' | 'gluon' | 'scalar' | 'ghost' | 'plain';
+type EdgeKind = 'fermion' | 'antifermion' | 'photon' | 'gluon' | 'scalar' | 'ghost' | 'plain' | 'double' | 'cscalar' | 'majorana';
 type LoopKind = 'plain' | 'photon' | 'gluon';
 type LoopFill = 'none' | 'hatched' | 'shaded';
 
@@ -19,6 +19,7 @@ type TextEl = { id: number, type: 'text', at: Pt, text: string, color?: string }
 type El = Edge | Loop | Vertex | TextEl;
 
 const W = 680, H = 400, GRID = 20, UNIT = 40; // 40 px = 1 cetz unit
+const DBL = 2.4; // px half-gap between the two rails of a double line
 
 const EDGE_KINDS: { k: EdgeKind, name: string }[] = [
   { k: 'fermion', name: 'Fermion —▶—' },
@@ -26,7 +27,10 @@ const EDGE_KINDS: { k: EdgeKind, name: string }[] = [
   { k: 'photon', name: 'Photon ∿∿∿' },
   { k: 'gluon', name: 'Gluon ⌀⌀⌀ (coil)' },
   { k: 'scalar', name: 'Scalar - - -' },
+  { k: 'cscalar', name: 'Charged scalar - ▶ -' },
   { k: 'ghost', name: 'Ghost · · ·' },
+  { k: 'majorana', name: 'Majorana —▶◀—' },
+  { k: 'double', name: 'Double line ═══' },
   { k: 'plain', name: 'Plain line' },
 ];
 
@@ -121,27 +125,46 @@ function edgeCode(e: Edge): string[] {
   const out: string[] = [];
   const c = ctrlPt(e.from, e.to, e.bend);
   const len = pathLen(e.from, e.to.x === e.from.x && e.to.y === e.from.y ? e.from : c, e.to);
-  const base = e.bend === 0
-    ? `line(${cx(e.from)}, ${cx(e.to)}`
-    : `bezier(${cx(e.from)}, ${cx(e.to)}, ${cx(c)}`;
+  const mkBase = (a: Pt, b: Pt, cc: Pt) => e.bend === 0
+    ? `line(${cx(a)}, ${cx(b)}`
+    : `bezier(${cx(a)}, ${cx(b)}, ${cx(cc)}`;
+  const base = mkBase(e.from, e.to, c);
+
   if (e.kind === 'photon' || e.kind === 'gluon') {
     const fn = e.kind === 'photon' ? 'wave' : 'coil';
     const segs = Math.max(3, Math.round(len / (e.kind === 'photon' ? 13 : 12)));
     out.push(`  decorations.${fn}(${base}), stroke: ${strokeOf(e.thickness, e.color)}, amplitude: ${num(e.amplitude / UNIT)}, segments: ${segs})`);
     return out;
   }
-  const stroke = e.kind === 'scalar' ? dashStroke(e.thickness, 'dashed', e.color)
+
+  // An arrowhead somewhere along the edge (dir +1 points forward, -1 backward).
+  const midMark = (t: number, dir: number) => {
+    const m = bezPt(e.from, c, e.to, t), d = bezTan(e.from, c, e.to, t), ex = 3.2;
+    const p1 = { x: m.x - dir * d.x * ex, y: m.y - dir * d.y * ex };
+    const p2 = { x: m.x + dir * d.x * ex, y: m.y + dir * d.y * ex };
+    out.push(`  mark(${cx(p1)}, ${cx(p2)}, symbol: ">", fill: ${paintOf(e.color)}, stroke: ${paintOf(e.color)}, scale: ${num(Math.max(0.8, e.thickness * 0.8))})`);
+  };
+
+  // Double line: two parallel rails offset along the chord normal.
+  if (e.kind === 'double') {
+    const l0 = Math.hypot(e.to.x - e.from.x, e.to.y - e.from.y) || 1;
+    const nx = -(e.to.y - e.from.y) / l0, ny = (e.to.x - e.from.x) / l0;
+    for (const s of [1, -1]) {
+      const o = (p: Pt): Pt => ({ x: p.x + nx * DBL * s, y: p.y + ny * DBL * s });
+      out.push(`  ${mkBase(o(e.from), o(e.to), o(c))}, stroke: ${strokeOf(e.thickness, e.color)})`);
+    }
+    if (e.endArrow) midMark(0.94, 1);
+    return out;
+  }
+
+  const stroke = (e.kind === 'scalar' || e.kind === 'cscalar') ? dashStroke(e.thickness, 'dashed', e.color)
     : e.kind === 'ghost' ? dashStroke(e.thickness, 'dotted', e.color) : strokeOf(e.thickness, e.color);
   const mark = e.endArrow ? `, mark: (end: ">", fill: ${paintOf(e.color)})` : '';
   out.push(`  ${base}, stroke: ${stroke}${mark})`);
-  if (e.kind === 'fermion' || e.kind === 'antifermion' || e.kind === 'ghost') {
-    // arrow in the middle of the propagator, along (or against) its direction
-    const m = bezPt(e.from, c, e.to, 0.5), d = bezTan(e.from, c, e.to, 0.5);
-    const s = e.kind === 'antifermion' ? -1 : 1, ex = 3.2;
-    const p1 = { x: m.x - s * d.x * ex, y: m.y - s * d.y * ex };
-    const p2 = { x: m.x + s * d.x * ex, y: m.y + s * d.y * ex };
-    out.push(`  mark(${cx(p1)}, ${cx(p2)}, symbol: ">", fill: ${paintOf(e.color)}, stroke: ${paintOf(e.color)}, scale: ${num(Math.max(0.8, e.thickness * 0.8))})`);
-  }
+  // Directional arrows in the middle of the propagator.
+  if (e.kind === 'fermion' || e.kind === 'cscalar' || e.kind === 'ghost') midMark(0.5, 1);
+  else if (e.kind === 'antifermion') midMark(0.5, -1);
+  else if (e.kind === 'majorana') { midMark(0.4, 1); midMark(0.6, -1); } // two clashing arrows
   return out;
 }
 
@@ -428,21 +451,33 @@ export default function FeynmanBuilder({ onClose, onInsert }: { onClose: () => v
   const renderEdge = (e: Edge) => {
     const c = ctrlPt(e.from, e.to, e.bend);
     const col = previewCol(e.color, e.id === selected);
-    const basePath = e.bend === 0
-      ? `M${e.from.x},${e.from.y} L${e.to.x},${e.to.y}`
-      : `M${e.from.x},${e.from.y} Q${c.x},${c.y} ${e.to.x},${e.to.y}`;
+    const pathFor = (a: Pt, b: Pt, cc: Pt) => e.bend === 0
+      ? `M${a.x},${a.y} L${b.x},${b.y}`
+      : `M${a.x},${a.y} Q${cc.x},${cc.y} ${b.x},${b.y}`;
+    const basePath = pathFor(e.from, e.to, c);
     const parts: React.ReactNode[] = [];
+    const midArrow = (t: number, back: boolean) => {
+      const m = bezPt(e.from, c, e.to, t), d = bezTan(e.from, c, e.to, t);
+      parts.push(<polygon key={`a${t}-${back}`} points={arrowPts(m, d, 5 + e.thickness * 1.5, back)} fill={col} />);
+    };
     if (e.kind === 'photon' || e.kind === 'gluon') {
       parts.push(<path key="p" d={decoPath(e.from, e.to, e.bend, e.kind, e.amplitude)} fill="none" stroke={col} strokeWidth={e.thickness} />);
-    } else {
-      const dash = e.kind === 'scalar' ? '8 5' : e.kind === 'ghost' ? '2 5' : undefined;
-      parts.push(<path key="p" d={basePath} fill="none" stroke={col} strokeWidth={e.thickness} strokeDasharray={dash} />);
-      if (e.kind === 'fermion' || e.kind === 'antifermion' || e.kind === 'ghost') {
-        const m = bezPt(e.from, c, e.to, 0.5), d = bezTan(e.from, c, e.to, 0.5);
-        parts.push(<polygon key="a" points={arrowPts(m, d, 5 + e.thickness * 1.5, e.kind === 'antifermion')} fill={col} />);
+    } else if (e.kind === 'double') {
+      const l0 = Math.hypot(e.to.x - e.from.x, e.to.y - e.from.y) || 1;
+      const nx = -(e.to.y - e.from.y) / l0, ny = (e.to.x - e.from.x) / l0;
+      for (const s of [1, -1]) {
+        const o = (p: Pt): Pt => ({ x: p.x + nx * DBL * s, y: p.y + ny * DBL * s });
+        parts.push(<path key={`d${s}`} d={pathFor(o(e.from), o(e.to), o(c))} fill="none" stroke={col} strokeWidth={e.thickness} />);
       }
+      if (e.endArrow) midArrow(0.94, false);
+    } else {
+      const dash = (e.kind === 'scalar' || e.kind === 'cscalar') ? '8 5' : e.kind === 'ghost' ? '2 5' : undefined;
+      parts.push(<path key="p" d={basePath} fill="none" stroke={col} strokeWidth={e.thickness} strokeDasharray={dash} />);
+      if (e.kind === 'fermion' || e.kind === 'cscalar' || e.kind === 'ghost') midArrow(0.5, false);
+      else if (e.kind === 'antifermion') midArrow(0.5, true);
+      else if (e.kind === 'majorana') { midArrow(0.4, false); midArrow(0.6, true); }
     }
-    if (e.endArrow && e.kind !== 'photon' && e.kind !== 'gluon') {
+    if (e.endArrow && e.kind !== 'photon' && e.kind !== 'gluon' && e.kind !== 'double') {
       const d = bezTan(e.from, c, e.to, 1);
       parts.push(<polygon key="e" points={arrowPts(e.to, d, 5 + e.thickness * 1.5, false)} fill={col} />);
     }
@@ -528,9 +563,15 @@ export default function FeynmanBuilder({ onClose, onInsert }: { onClose: () => v
 
             <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '6px', cursor: tool === 'select' ? 'default' : 'crosshair', touchAction: 'none', display: 'block' }}
               onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}>
+              {/* Alignment grid: minor lines every GRID px, stronger lines every
+                  UNIT px (= 1 cetz unit). Drawing aid only — never exported. */}
               <defs>
-                <pattern id="fgrid" width={GRID} height={GRID} patternUnits="userSpaceOnUse">
-                  <circle cx="0" cy="0" r="0.8" fill="#d8dee8" />
+                <pattern id="fgrid-minor" width={GRID} height={GRID} patternUnits="userSpaceOnUse">
+                  <path d={`M ${GRID} 0 L 0 0 0 ${GRID}`} fill="none" stroke="#e7ebf2" strokeWidth="1" />
+                </pattern>
+                <pattern id="fgrid" width={UNIT} height={UNIT} patternUnits="userSpaceOnUse">
+                  <rect width={UNIT} height={UNIT} fill="url(#fgrid-minor)" />
+                  <path d={`M ${UNIT} 0 L 0 0 0 ${UNIT}`} fill="none" stroke="#cfd8e6" strokeWidth="1" />
                 </pattern>
               </defs>
               <rect width={W} height={H} fill="url(#fgrid)" />
@@ -549,6 +590,7 @@ export default function FeynmanBuilder({ onClose, onInsert }: { onClose: () => v
             <div className="form-hint" style={{ marginTop: '6px' }}>
               <b>Line / Circle</b>: click &amp; drag to draw. <b>Select</b>: click an element, then drag it or its handles
               (line endpoints snap to nearby vertices; the middle handle bends the line into an arc). <b>⌫</b> deletes, <b>⌘Z</b> undoes.
+              The grid (bold lines = 1 unit) is a drawing guide only and is never added to the diagram.
             </div>
           </div>
 

@@ -9,7 +9,7 @@ const PRESETS = [50, 75, 90, 100, 110, 125, 150, 200, 300];
 
 // memo: the app re-renders on every keystroke; the preview only cares about `url`
 // (and onWordClick is a stable useCallback), so skip those renders entirely.
-function PdfPreview({ url, onWordClick }: { url: string, onWordClick: (word: string, context?: string) => void }) {
+function PdfPreview({ url, onWordClick, onWordCount }: { url: string, onWordClick: (word: string, context?: string) => void, onWordCount?: (n: number) => void }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pagesRef = useRef<HTMLDivElement | null>(null);
   const renderTokenRef = useRef(0);
@@ -71,9 +71,14 @@ function PdfPreview({ url, onWordClick }: { url: string, onWordClick: (word: str
       if (cache.url !== url || !cache.doc) {
         let loaded;
         try { loaded = await pdfjsLib.getDocument(url).promise; } catch { return; }
-        if (token !== renderTokenRef.current) return;
+        if (token !== renderTokenRef.current) { try { loaded.destroy(); } catch {} return; }
+        const prevDoc = docCache.current.doc;
         const pg = await loaded.getPage(1);
         docCache.current = { url, doc: loaded, naturalW: pg.getViewport({ scale: 1 }).width };
+        // Free the previously-loaded PDF (parsed data + its worker transport) —
+        // the document recompiles on every edit, so without this each compile
+        // orphans a whole pdf.js document and the memory climbs steadily.
+        if (prevDoc && prevDoc !== loaded) { try { prevDoc.destroy(); } catch {} }
         cache = docCache.current;
       }
       const dScale = displayScale(w, zoomFactor);
@@ -112,6 +117,47 @@ function PdfPreview({ url, onWordClick }: { url: string, onWordClick: (word: str
     })();
   }, [url, rasterTick, zoomFactor]);
 
+  // Word count from the RENDERED document (the PDF's text), not the Typst source —
+  // so `#set`, `#import`, function names and markup syntax don't inflate it. Runs
+  // once per compile (keyed on url), independent of zoom/resize re-rasterisation.
+  useEffect(() => {
+    if (!url || !onWordCount) return;
+    let cancelled = false;
+    (async () => {
+      let doc: any = null, temp = false;
+      try {
+        if (docCache.current.url === url && docCache.current.doc) {
+          doc = docCache.current.doc;                       // reuse the shared doc
+        } else {
+          doc = await pdfjsLib.getDocument(url).promise;    // our own copy…
+          temp = true;                                      // …so we must destroy it
+        }
+        let text = '';
+        for (let i = 1; i <= doc.numPages; i++) {
+          if (cancelled) break;
+          const tc = await doc.getPage(i).then((p: any) => p.getTextContent());
+          for (const it of tc.items) {
+            if ('str' in it) text += it.str;
+            // pdf.js emits spacing as its own runs; add a break on end-of-line.
+            if (it.hasEOL) text += '\n';
+          }
+          text += '\n';
+        }
+        if (!cancelled) onWordCount((text.match(/[^\s]+/g) || []).length);
+      } catch { /* leave the last known count in place */ }
+      finally { if (temp && doc) { try { await doc.destroy(); } catch {} } }
+    })();
+    return () => { cancelled = true; };
+  }, [url, onWordCount]);
+
+  // Destroy the last-held PDF document when the preview unmounts (workspace
+  // switch, app close) so it doesn't linger with its worker transport.
+  useEffect(() => () => {
+    const d = docCache.current.doc;
+    docCache.current = { url: null, doc: null, naturalW: docCache.current.naturalW };
+    if (d) { try { d.destroy(); } catch {} }
+  }, []);
+
   const handleDblClick = () => {
     const sel = window.getSelection();
     const word = (sel?.toString() ?? '').trim();
@@ -147,7 +193,9 @@ function PdfPreview({ url, onWordClick }: { url: string, onWordClick: (word: str
           {PRESETS.map(p => <option key={p} value={String(p)}>{p}%</option>)}
         </select>
         <button className="pdf-btn" onClick={() => setZoom(Math.min(zoomFactor * 1.15, 8))} title="Zoom in">+</button>
-        <button className={`pdf-btn ${isFit ? 'active' : ''}`} onClick={() => setZoom(1)} title="Fit page width">Fit</button>
+        <button className={`pdf-btn pdf-btn-icon ${isFit ? 'active' : ''}`} onClick={() => setZoom(1)} title="Fit to page width">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 9V5a1 1 0 0 1 1-1h4"></path><path d="M20 9V5a1 1 0 0 0-1-1h-4"></path><path d="M4 15v4a1 1 0 0 0 1 1h4"></path><path d="M20 15v4a1 1 0 0 1-1 1h-4"></path></svg>
+        </button>
       </div>
       <div className="pdf-scroll" ref={scrollRef} onDoubleClick={handleDblClick} title="Double-click a word to jump to it in the editor">
         <div className="pdf-pages" ref={pagesRef} />

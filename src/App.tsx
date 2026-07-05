@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
 import { API } from './api';
 import Editor, { useMonaco } from '@monaco-editor/react';
-import { setupTypstLanguage, lookupTypstDoc, type TypstDoc } from './typstMonaco';
+import { setupTypstLanguage, setWorkspaceImages } from './typstMonaco';
 import { PackageInstaller } from './PackageInstaller';
 import { TemplateInstaller } from './TemplateInstaller';
 import DiagramBuilder from './components/DiagramBuilder';
@@ -18,6 +18,11 @@ import PdfPreview from './components/PdfPreview';
 // Loaded on demand: pulls in all of three.js, which nothing else needs.
 const Plot3DStudio = lazy(() => import('./components/Plot3DStudio'));
 const FeynmanBuilder = lazy(() => import('./components/FeynmanBuilder'));
+const EquationGallery = lazy(() => import('./components/EquationGallery'));
+import type { EqTemplate } from './components/EquationGallery';
+const FlowchartCoder = lazy(() => import('./components/FlowchartCoder'));
+const MatrixStudio = lazy(() => import('./components/MatrixStudio'));
+const ImagePlacer = lazy(() => import('./components/ImagePlacer'));
 import SymbolDraw from './components/SymbolDraw';
 import RefManager from './components/RefManager';
 import BibManager from './components/BibManager';
@@ -148,6 +153,9 @@ export const latexMathToTypst = (s: string): string => {
 
 // Palette for the toolbar text-colour button.
 const TEXT_COLORS = ['#000000', '#64748b', '#ef4444', '#f97316', '#f59e0b', '#22c55e', '#14b8a6', '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899', '#b91c1c', '#166534', '#1e3a8a'];
+// Soft, readable marker tints for the highlight popover (text stays legible on top).
+const HIGHLIGHT_COLORS = ['#fff59d', '#fde68a', '#bbf7d0', '#a7f3d0', '#bfdbfe', '#c7d2fe', '#ddd6fe', '#fbcfe8', '#fecaca', '#e2e8f0'];
+const FONT_SIZE_PRESETS = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72];
 
 // --- File → Open Recent -------------------------------------------------------
 // Desktop entries store the absolute path; Chrome/Edge entries store the
@@ -207,8 +215,15 @@ export default function App() {
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  // Word count of the RENDERED document (reported by PdfPreview from the PDF's
+  // text), so the header reflects the reader-facing prose — not the Typst source.
+  const [pdfWords, setPdfWords] = useState<number | null>(null);
+  const handlePdfWordCount = useCallback((n: number) => setPdfWords(n), []);
   const [isCompiling, setIsCompiling] = useState(false);
   const [errorLogs, setErrorLogs] = useState<string | null>(null);
+  // Set only when a real compile fails (kept separate from errorLogs, which is
+  // also reused for transient UI hints). Drives the clear preview error panel.
+  const [compileError, setCompileError] = useState<string | null>(null);
   const [theme, setTheme] = useState<'typst-dark' | 'typst-light'>(() =>
     localStorage.getItem('editor_theme') === 'typst-light' ? 'typst-light' : 'typst-dark');
   const [editorFontSize, setEditorFontSize] = useState<number>(() => Number(localStorage.getItem('editor_font_size')) || 14);
@@ -227,6 +242,11 @@ export default function App() {
   // Palette anchor (viewport coords). Position: fixed — the toolbar scrolls
   // horizontally (overflow-x), which would clip an absolutely-positioned child.
   const [colorPopAt, setColorPopAt] = useState<{ x: number, y: number } | null>(null);
+  const [highlightColor, setHighlightColor] = useState<string>(() => localStorage.getItem('highlight_color') || '#fff59d');
+  const [highlightPopAt, setHighlightPopAt] = useState<{ x: number, y: number } | null>(null);
+  const [fontSizePopAt, setFontSizePopAt] = useState<{ x: number, y: number } | null>(null);
+  const [fontSizeVal, setFontSizeVal] = useState<number>(12);
+  useEffect(() => { localStorage.setItem('highlight_color', highlightColor); }, [highlightColor]);
   useEffect(() => { localStorage.setItem('text_color', textColor); }, [textColor]);
   useEffect(() => { localStorage.setItem('editor_font_size', String(editorFontSize)); }, [editorFontSize]);
   useEffect(() => { localStorage.setItem('compile_delay', String(compileDelay)); }, [compileDelay]);
@@ -246,6 +266,23 @@ export default function App() {
   const [showSymbolPicker, setShowSymbolPicker] = useState(false);
   const [showDiagramBuilder, setShowDiagramBuilder] = useState(false);
   const [showFeynman, setShowFeynman] = useState(false);
+  const [showEqGallery, setShowEqGallery] = useState(false);
+  const [showMatrixStudio, setShowMatrixStudio] = useState(false);
+  const [showImagePlacer, setShowImagePlacer] = useState<string | boolean>(false);
+
+  // Collect image file paths from the workspace tree for the ImagePlacer picker.
+  const workspaceImages = useMemo(() => {
+    const imgs: string[] = [];
+    const walk = (nodes: typeof fileTree) => {
+      for (const n of nodes) {
+        if (n.type === 'directory' && n.children) walk(n.children);
+        else if (/\.(png|jpe?g|gif|svg|webp|avif|bmp|tiff?)$/i.test(n.name)) imgs.push(n.path);
+      }
+    };
+    walk(fileTree);
+    return imgs;
+  }, [fileTree]);
+  const [showFlowchart, setShowFlowchart] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   const [showFigureBuilder, setShowFigureBuilder] = useState(false);
   const [showQuiver, setShowQuiver] = useState(false);
@@ -261,7 +298,7 @@ export default function App() {
   const [showSaveAs, setShowSaveAs] = useState(false);
   const [showPlot3D, setShowPlot3D] = useState(false);
   const [showSymbolDraw, setShowSymbolDraw] = useState(false);
-  const [docPopup, setDocPopup] = useState<{ info: TypstDoc; x: number; y: number } | { notFound: string } | null>(null);
+
   const [showRefManager, setShowRefManager] = useState(false);
   const [showBibManager, setShowBibManager] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -278,6 +315,9 @@ export default function App() {
   const monaco = useMonaco();
 
   useEffect(() => { if (monaco) setupTypstLanguage(monaco); }, [monaco]);
+  // Keep the editor's image-path autocomplete (inside image("…")) in sync with
+  // the workspace's image files.
+  useEffect(() => { setWorkspaceImages(workspaceImages); }, [workspaceImages]);
   useEffect(() => { fetchTree(); }, []);
 
   useEffect(() => {
@@ -354,15 +394,18 @@ export default function App() {
       
       const res = await fetch(`${API}/compile?main=${encodeURIComponent(mainFile)}`, { method: 'POST' });
       if (!res.ok) {
-        const errData = await res.json();
-        setErrorLogs(errData.error || 'Compilation failed');
+        const errData = await res.json().catch(() => ({}));
+        const msg = errData.error || 'Compilation failed.';
+        setErrorLogs(msg);
+        setCompileError(msg);
         return;
       }
-      
+
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       setPdfUrl(prev => { if (prev) URL.revokeObjectURL(prev); return url; });
       setErrorLogs(null);
+      setCompileError(null);
       
       setHistory(prev => {
         let newHistory = [...prev];
@@ -372,13 +415,28 @@ export default function App() {
             newHistory.push({ id: Math.random().toString(), timestamp: Date.now(), path: tab.path, content: tab.content });
           }
         }
-        return newHistory;
+        // Cap per-file history — each entry holds a FULL document snapshot, and
+        // compile-on-type pushes one per change, so an unbounded array would grow
+        // to hundreds of copies of the doc over a long session. Keep the newest N.
+        const PER_FILE_CAP = 50;
+        const seen: Record<string, number> = {};
+        const kept: typeof newHistory = [];
+        for (let i = newHistory.length - 1; i >= 0; i--) {
+          const h = newHistory[i];
+          seen[h.path] = (seen[h.path] || 0) + 1;
+          if (seen[h.path] <= PER_FILE_CAP) kept.push(h);
+        }
+        return kept.reverse();
       });
 
       setTabs(prev => prev.map(t => ({ ...t, isDirty: false })));
       fetchTree();
     } catch (error) {
-      setErrorLogs(String(error));
+      const msg = error instanceof Error && /fetch/i.test(error.message)
+        ? "Couldn't reach the local Typst engine. Make sure the app's backend is running, then recompile."
+        : String(error);
+      setErrorLogs(msg);
+      setCompileError(msg);
     } finally {
       setIsCompiling(false);
     }
@@ -430,11 +488,15 @@ export default function App() {
   const shortcutRef = useRef<Record<string, () => void>>({});
   shortcutRef.current = {
     'S-e': () => insertNumberedEquation(),
-    'S-m': () => insertMatrix(),
+    'S-m': () => setShowMatrixStudio(true),
     'S-p': () => setShowSymbolPicker(true),
+    'S-g': () => setShowEqGallery(true),
+    'S-l': () => setShowFlowchart(true),
     'S-f': () => setShowFeynman(true),
     'S-k': () => setCodeRunner({ initialLang: 'python' }),
     'S-u': () => computeSelection(),
+    'S-y': () => setShowSymbolDraw(true),
+    'S-b': () => insertCodeBlock(),
     'b': () => wrapSelection('*', '*'),
     'i': () => wrapSelection('_', '_'),
     'e': () => wrapSelection('$', '$'),
@@ -552,6 +614,76 @@ export default function App() {
       await fetchTree();
       const ext = (file.name.split('.').pop() || '').toLowerCase();
       if (IMG_EXT.includes(ext)) insertCode(`\n#figure(\n  image("${path}", width: 80%),\n  caption: [],\n)\n`);
+    };
+    input.click();
+  };
+
+  // Read the family name out of a .ttf/.otf name table so we can pre-fill the
+  // #set text(font: …) call — Typst matches fonts by their internal family name,
+  // which often differs from the file name.
+  const readFontFamily = (buf: ArrayBuffer): string | null => {
+    try {
+      const dv = new DataView(buf);
+      const numTables = dv.getUint16(4);
+      let nameOff = -1;
+      for (let i = 0; i < numTables; i++) {
+        const rec = 12 + i * 16;
+        const tag = String.fromCharCode(dv.getUint8(rec), dv.getUint8(rec + 1), dv.getUint8(rec + 2), dv.getUint8(rec + 3));
+        if (tag === 'name') { nameOff = dv.getUint32(rec + 8); break; }
+      }
+      if (nameOff < 0) return null;
+      const count = dv.getUint16(nameOff + 2);
+      const strOff = nameOff + dv.getUint16(nameOff + 4);
+      let best: string | null = null, bestScore = -1;
+      for (let i = 0; i < count; i++) {
+        const r = nameOff + 6 + i * 12;
+        const platformID = dv.getUint16(r), nameID = dv.getUint16(r + 6);
+        const len = dv.getUint16(r + 8), off = dv.getUint16(r + 10);
+        if (nameID !== 1 && nameID !== 16) continue;
+        const start = strOff + off; let s = '';
+        if (platformID === 3 || platformID === 0) { for (let j = 0; j < len; j += 2) s += String.fromCharCode(dv.getUint16(start + j)); }
+        else { for (let j = 0; j < len; j++) s += String.fromCharCode(dv.getUint8(start + j)); }
+        s = s.replace(/\0/g, '').trim();
+        if (!s) continue;
+        const score = (nameID === 16 ? 2 : 1) + (platformID === 3 ? 0.5 : 0);
+        if (score > bestScore) { bestScore = score; best = s; }
+      }
+      return best;
+    } catch { return null; }
+  };
+
+  // Set (or replace) the document font in the first `#set text(font: …)` rule,
+  // inserting one near the top if none exists yet.
+  const applyDocumentFont = (fam: string) => {
+    const editor = editorRef.current, model = editor?.getModel();
+    if (!editor || !model || !fam) return;
+    const text = model.getValue();
+    const m = text.match(/#set\s+text\([^)]*\bfont:\s*"[^"]*"/);
+    if (m) {
+      const start = text.indexOf(m[0]);
+      const newStr = m[0].replace(/font:\s*"[^"]*"/, `font: "${fam}"`);
+      const from = model.getPositionAt(start), to = model.getPositionAt(start + m[0].length);
+      editor.executeEdits('font', [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column } as any, text: newStr, forceMoveMarkers: true }]);
+      editor.focus();
+    } else {
+      insertAtTop(`#set text(font: "${fam}")\n`);
+    }
+  };
+
+  // Import a .ttf/.otf into <workspace>/fonts and point the document at it.
+  const importFont = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.ttf,.otf';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const buf = await file.arrayBuffer();
+      const detected = readFontFamily(buf) || file.name.replace(/\.(ttf|otf)$/i, '');
+      const family = window.prompt('Font family name for #set text(font: "…")\n(auto-detected from the file — edit if needed):', detected);
+      await fetch(`${API}/workspace/upload?path=${encodeURIComponent('fonts/' + file.name)}`, { method: 'POST', body: buf, headers: { 'Content-Type': 'application/octet-stream' } });
+      await fetchTree();
+      if (family && family.trim()) applyDocumentFont(family.trim());
     };
     input.click();
   };
@@ -826,6 +958,19 @@ export default function App() {
     } else insertCode(text);
   };
 
+  // --- Shared selection helper ------------------------------------------------
+  // Many insert-* functions begin with the same 3-line boilerplate to grab the
+  // editor, model, selection, and selected text (with a fallback default).
+  // This helper extracts that pattern so callers can just write:
+  //   const ctx = getSelectionCtx('fallback');
+  const getSelectionCtx = (fallback = '') => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    const sel = editor?.getSelection();
+    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : fallback;
+    return { editor, model, sel, inner };
+  };
+
   // Insert content near the top of the document, just after the preamble
   // (leading #import / #set / comment / blank lines). Used for title, author,
   // institute and abstract, which belong at the top regardless of the cursor.
@@ -850,11 +995,77 @@ export default function App() {
 
   // Insert LaTeX (e.g. Wolfram TeXForm / sympy latex()) as rendered Typst math via
   // the mitex package, importing it once at the top of the document.
+  // Includes a best-effort sanitiser that converts common SymPy str() output
+  // (e.g. raw print()) into passable LaTeX so #mitex() can render it.
+
+  /** Best-effort conversion of raw SymPy / Python math text into LaTeX. */
+  const sympyToLatex = (raw: string): string => {
+    let s = raw;
+
+    // --- Derivative(f, x) / Derivative(f, x, n) → \frac{d}{dx} f  ---
+    s = s.replace(/Derivative\(([^,]+),\s*([^,)]+)\)/g, (_m, f, v) =>
+      `\\frac{d}{d${v.trim()}} ${f.trim()}`);
+
+    // --- sqrt(expr) → \sqrt{expr} ---
+    // Handle nested parens via a simple depth-aware scan
+    s = s.replace(/sqrt\(/g, '\\sqrt{').replace(/\\sqrt\{([^}]*)\)/g, '\\sqrt{$1}');
+    // Fallback: balanced single-level
+    s = s.replace(/\\sqrt\{([^{}]*)\)/g, '\\sqrt{$1}');
+
+    // --- Python ** exponent → LaTeX ^{} ---
+    // e.g. r**2 → r^{2}, sin(theta)**2 → sin(theta)^{2}
+    s = s.replace(/\*\*(\d+)/g, '^{$1}');
+    s = s.replace(/\*\*\(([^)]+)\)/g, '^{$1}');
+
+    // --- Greek letters (must come before trig so "theta" inside sin() is caught) ---
+    const greekLetters = [
+      'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta',
+      'theta', 'iota', 'kappa', 'lambda', 'mu', 'nu', 'xi',
+      'omicron', 'pi', 'rho', 'sigma', 'tau', 'upsilon', 'phi',
+      'chi', 'psi', 'omega',
+      'Gamma', 'Delta', 'Theta', 'Lambda', 'Xi', 'Pi', 'Sigma',
+      'Upsilon', 'Phi', 'Psi', 'Omega',
+    ];
+    // Sort longest-first so "theta" is matched before "eta", etc.
+    const sorted = [...greekLetters].sort((a, b) => b.length - a.length);
+    // Custom word boundary: _ is a word char in JS regex \b, but in LaTeX
+    // notation theta_ should still match "theta". Use lookaround on [A-Za-z]
+    // instead of \b so underscores/carets don't block matches.
+    for (const g of sorted) {
+      const re = new RegExp(`(?<!\\\\)(?<![A-Za-z])${g}(?![A-Za-z])`, 'g');
+      s = s.replace(re, `\\${g}`);
+    }
+
+    // --- Trig / log functions → \sin, \cos, etc. ---
+    const funcs = ['sin', 'cos', 'tan', 'cot', 'sec', 'csc',
+                   'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
+                   'log', 'ln', 'exp'];
+    for (const fn of funcs) {
+      const re = new RegExp(`(?<!\\\\)(?<![A-Za-z])${fn}(?![A-Za-z])`, 'g');
+      s = s.replace(re, `\\${fn}`);
+    }
+
+    // --- Subscript / superscript grouping ---
+    // ^word  →  ^{word}   (single word/letter after ^)
+    s = s.replace(/\^([A-Za-z\\][A-Za-z0-9]*)/g, '^{$1}');
+    // ^{...} already OK — don't double-wrap (the above won't match { )
+    // _(...)  →  _{...}   (parenthesised subscript like _(r r))
+    s = s.replace(/_\(([^)]*)\)/g, '_{$1}');
+    // _word  →  _{word}   (single word after _)
+    s = s.replace(/_([A-Za-z\\][A-Za-z0-9]*)/g, '_{$1}');
+
+    // --- Multiplication: remove explicit * between factors ---
+    // "a*b" → "a b"  (but not ** which is already handled)
+    s = s.replace(/(?<!\*)\*(?!\*)/g, ' ');
+
+    return s;
+  };
+
   const insertEquationFromLatex = (latex: string, codeBlock?: string) => {
     ensureRule('@preview/mitex', '#import "@preview/mitex:0.2.7": mitex');
     const lines = latex.split('\n').map(l => l.trim()).filter(Boolean);
     if (lines.length === 0) return;
-    const body = lines.map(l => '#mitex(`' + l + '`)').join('\n\n');
+    const body = lines.map(l => '#mitex(`' + sympyToLatex(l) + '`)').join('\n\n');
     insertCode('\n' + (codeBlock ? codeBlock + '\n' : '') + body + '\n\n');
   };
 
@@ -1011,6 +1222,27 @@ export default function App() {
     }
   });
 
+  // Matrix Studio output: inject only the #let helpers the generated matrix
+  // actually references (each helper is inserted at most once by ensureSetup).
+  const insertMatrixBody = (body: string) => {
+    // Border-drawing matrices use the pavemat package.
+    if (body.includes('pavemat(')) ensureSetup('@preview/pavemat', '#import "@preview/pavemat:0.2.0": pavemat');
+    // Code-array output can ship reusable array/matrix operation helpers.
+    if (body.includes('mat-transpose') || body.includes('mat-mul') || body.includes('mat-show'))
+      ensureSetup('#let mat-transpose', [
+        '#let mat-transpose(a) = range(a.at(0).len()).map(j => a.map(row => row.at(j)))',
+        '#let mat-add(a, b) = a.enumerate().map(((i, row)) => row.enumerate().map(((j, x)) => x + b.at(i).at(j)))',
+        '#let mat-scale(a, s) = a.map(row => row.map(x => x * s))',
+        '#let mat-mul(a, b) = a.map(row => range(b.at(0).len()).map(j => range(b.len()).fold(0, (acc, k) => acc + row.at(k) * b.at(k).at(j))))',
+        '#let mat-show(a) = math.equation(math.mat(..a))',
+      ].join('\n'));
+    if (body.includes('cellbox(')) ensureSetup('#let cellbox', '#let cellbox(body, fill: none) = box(fill: fill, inset: 3pt, radius: 2pt, baseline: 3pt)[#body]');
+    if (body.includes('hatch(')) ensureSetup('#let hatch(', '#let hatch(c) = tiling(size: (5pt, 5pt), line(start: (0%, 100%), end: (100%, 0%), stroke: 0.6pt + c))');
+    if (body.includes('hatchx(')) ensureSetup('#let hatchx(', '#let hatchx(c) = tiling(size: (5pt, 5pt), { place(line(start: (0%, 100%), end: (100%, 0%), stroke: 0.6pt + c)); place(line(start: (0%, 0%), end: (100%, 100%), stroke: 0.6pt + c)) })');
+    if (body.includes('hatchd(')) ensureSetup('#let hatchd(', '#let hatchd(c) = tiling(size: (5pt, 5pt), place(dx: 2pt, dy: 2pt, circle(radius: 0.7pt, fill: c)))');
+    insertCode(body);
+  };
+
   const insertTable = () => setInputModal({
     title: 'Insert Table',
     fields: [
@@ -1019,7 +1251,11 @@ export default function App() {
       { key: 'header', label: 'Bold coloured header row', type: 'checkbox', default: 'true' },
       { key: 'headercolor', label: 'Header colour', type: 'select', default: 'blue', options: ['blue', 'gray', 'green', 'orange', 'purple', 'red'] },
       { key: 'stripe', label: 'Zebra striping', type: 'checkbox', default: 'false' },
-      { key: 'align', label: 'Cell alignment', type: 'select', default: 'left', options: ['left', 'center', 'right', 'horizon'] },
+      { key: 'colwidths', label: 'Column widths', default: '', placeholder: 'blank = equal · e.g. auto  or  1fr 2fr auto', hint: 'One token per column (space/comma separated): auto, 1fr, 3cm, 30%. One token → applied to all. Blank → equal columns.' },
+      { key: 'align', label: 'Horizontal alignment', type: 'select', default: 'left', options: ['left', 'center', 'right'] },
+      { key: 'colalign', label: 'Per-column alignment', default: '', placeholder: 'blank = same for all · e.g. left center right', hint: 'Override alignment per column, one token each (left/center/right). Blank uses the single alignment above.' },
+      { key: 'valign', label: 'Vertical alignment', type: 'select', default: 'horizon', options: ['horizon', 'top', 'bottom'] },
+      { key: 'inset', label: 'Cell padding', default: '7pt', placeholder: '7pt · or "x: 8pt, y: 4pt"' },
       { key: 'border', label: 'Border', type: 'select', default: 'all lines', options: ['all lines', 'none', 'horizontal only'] },
       { key: 'borderthickness', label: 'Border thickness', default: '0.5pt' },
       { key: 'bordercolor', label: 'Border colour', type: 'select', default: 'gray', options: ['gray', 'black', 'blue', 'red', 'green'] },
@@ -1035,7 +1271,19 @@ export default function App() {
         'none': '  stroke: none,',
         'horizontal only': `  stroke: (x, y) => (top: ${bstroke}, bottom: ${bstroke}),`,
       };
-      const lines: string[] = [`  columns: ${c},`, `  align: ${v.align} + horizon,`, `  inset: 7pt,`, strokeMap[v.border] || strokeMap['all lines']];
+      const valign = v.valign || 'horizon';
+      // Column sizing: blank → N equal columns; one token → repeated; many → a tuple.
+      const widthTokens = (v.colwidths || '').trim().split(/[\s,]+/).filter(Boolean);
+      const columns = widthTokens.length === 0 ? `${c}`
+        : widthTokens.length === 1 ? `(${widthTokens[0]},) * ${c}`
+        : `(${widthTokens.join(', ')})`;
+      // Alignment: per-column list if given, else a single alignment.
+      const alignTokens = (v.colalign || '').trim().split(/[\s,]+/).filter(Boolean);
+      const alignExpr = alignTokens.length > 0
+        ? `(${alignTokens.map(a => `${a} + ${valign}`).join(', ')})`
+        : `${v.align} + ${valign}`;
+      const inset = (v.inset || '7pt').trim().includes(':') ? `(${(v.inset).trim()})` : (v.inset || '7pt').trim();
+      const lines: string[] = [`  columns: ${columns},`, `  align: ${alignExpr},`, `  inset: ${inset},`, strokeMap[v.border] || strokeMap['all lines']];
       // Fill: header row + optional zebra.
       const fillParts: string[] = [];
       if (hdr) fillParts.push(`if y == 0 { ${v.headercolor}.lighten(70%) }`);
@@ -1075,9 +1323,7 @@ export default function App() {
   };
 
   const insertCancel = () => {
-    const editor = editorRef.current, model = editor?.getModel();
-    const sel = editor?.getSelection();
-    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'x';
+    const { editor, model, sel, inner } = getSelectionCtx('x');
     setInputModal({
       title: 'Cross Out / Strike Through',
       fields: [
@@ -1117,9 +1363,7 @@ export default function App() {
 
   // Rotate any content — equations included.
   const insertRotate = () => {
-    const editor = editorRef.current, model = editor?.getModel();
-    const sel = editor?.getSelection();
-    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : '$ E = m c^2 $';
+    const { editor, model, sel, inner } = getSelectionCtx('$ E = m c^2 $');
     setInputModal({
       title: 'Rotate Content / Equation',
       fields: [
@@ -1153,9 +1397,7 @@ export default function App() {
 
   // ---- Text: underline / highlight / box, with colour ------------------------
   const insertUnderline = () => {
-    const editor = editorRef.current, model = editor?.getModel();
-    const sel = editor?.getSelection();
-    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'text';
+    const { editor, model, sel, inner } = getSelectionCtx('text');
     setInputModal({
       title: 'Underline (with colour)',
       fields: [
@@ -1181,35 +1423,21 @@ export default function App() {
     });
   };
 
-  const insertHighlight = () => {
-    const editor = editorRef.current, model = editor?.getModel();
-    const sel = editor?.getSelection();
-    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'text';
+  // Factory for simple colour-wrapper inserts (highlight, text colour, etc.)
+  const insertColorWrap = (title: string, colorLabel: string, defaultColor: string, fn: string, prop: string) => () => {
+    const { editor, model, sel, inner } = getSelectionCtx('text');
     setInputModal({
-      title: 'Highlight / Background Colour',
+      title,
       fields: [
         { key: 'body', label: 'Text', default: inner },
-        { key: 'color', label: 'Background colour', type: 'color', default: 'rgb("#fff59d")' },
+        { key: 'color', label: colorLabel, type: 'color', default: defaultColor },
       ],
       submitLabel: 'Insert',
-      onSubmit: (v) => replaceOrInsert(sel, editor, model, `#highlight(fill: ${v.color})[${v.body}]`)
+      onSubmit: (v) => replaceOrInsert(sel, editor, model, `#${fn}(${prop}: ${v.color})[${v.body}]`)
     });
   };
-
-  const insertTextColor = () => {
-    const editor = editorRef.current, model = editor?.getModel();
-    const sel = editor?.getSelection();
-    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'text';
-    setInputModal({
-      title: 'Text Colour',
-      fields: [
-        { key: 'body', label: 'Text', default: inner },
-        { key: 'color', label: 'Colour', type: 'color', default: 'rgb("#ef4444")' },
-      ],
-      submitLabel: 'Insert',
-      onSubmit: (v) => replaceOrInsert(sel, editor, model, `#text(fill: ${v.color})[${v.body}]`)
-    });
-  };
+  const insertHighlight = insertColorWrap('Highlight / Background Colour', 'Background colour', 'rgb("#fff59d")', 'highlight', 'fill');
+  const insertTextColor = insertColorWrap('Text Colour', 'Colour', 'rgb("#ef4444")', 'text', 'fill');
 
   const setSelectionFontSizePrompt = () => setInputModal({
     title: 'Font Size',
@@ -1219,9 +1447,7 @@ export default function App() {
   });
 
   const insertBox = () => {
-    const editor = editorRef.current, model = editor?.getModel();
-    const sel = editor?.getSelection();
-    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'content';
+    const { editor, model, sel, inner } = getSelectionCtx('content');
     setInputModal({
       title: 'Box Selection — fill, texture, border',
       fields: [
@@ -1265,9 +1491,7 @@ export default function App() {
 
   // ---- Layout: alignment -----------------------------------------------------
   const insertAlign = () => {
-    const editor = editorRef.current, model = editor?.getModel();
-    const sel = editor?.getSelection();
-    const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : 'content';
+    const { editor, model, sel, inner } = getSelectionCtx('content');
     setInputModal({
       title: 'Align Content',
       fields: [
@@ -1303,12 +1527,9 @@ export default function App() {
   // Wrap the selected element (figure/table/plot/image/…) in a numbered #figure
   // with a caption, so it gets a "Figure N" number and can be cross-referenced.
   const wrapInFigure = () => {
-    const editor = editorRef.current;
-    const model = editor?.getModel();
+    const { editor, model, sel, inner: selected } = getSelectionCtx('');
     if (!editor || !model) return;
     editor.focus();
-    const sel = editor.getSelection();
-    const selected = sel && !sel.isEmpty() ? model.getValueInRange(sel).trim() : '';
     setInputModal({
       title: 'Wrap in Figure',
       fields: [
@@ -1387,12 +1608,30 @@ export default function App() {
     insertCode(`\n$ ${eq.code} $\n\n`);
   };
 
-  // Ensure a multi-line preamble block exists once, at the top of the document.
-  const ensureSetup = (marker: string, block: string) => {
-    if (!activeTab || activeTab.content.includes(marker)) return;
-    const editor = editorRef.current, model = editor?.getModel();
-    if (editor && model) editor.executeEdits('setup', [{ range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 1 } as any, text: block + '\n\n', forceMoveMarkers: true }]);
+  // Insert a Monaco snippet (with ${1:…} tab-stops) at the cursor so the reader
+  // can Tab through the blanks. Falls back to plain text if the snippet
+  // controller isn't available.
+  const insertSnippet = (snippet: string) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+    const controller: any = editor.getContribution?.('snippetController2');
+    if (controller && typeof controller.insert === 'function') controller.insert(snippet);
+    else insertCode(snippet.replace(/\$\{\d+:([^}]*)\}/g, '$1').replace(/\$\{\d+\}/g, '').replace(/\$\d+/g, ''));
   };
+
+  // Insert an equation-gallery template, wrapped in inline or display math.
+  const insertEqTemplate = (t: EqTemplate, display: boolean) => {
+    if (t.physica) ensureRule('@preview/physica', '#import "@preview/physica:0.9.8": *');
+    insertSnippet(display ? `\n$ ${t.snippet} $\n\n` : `$ ${t.snippet} $`);
+    setShowEqGallery(false);
+  };
+
+  // Ensure a multi-line preamble block exists once, at the top of the document.
+  // A multi-line setup block (e.g. #let theorem = …) is just a rule with an
+  // extra trailing blank line — delegate to ensureRule to avoid duplicating the
+  // once-only insert-at-top logic.
+  const ensureSetup = (marker: string, block: string) => ensureRule(marker, block + '\n');
 
   const insertTheorem = () => setInputModal({
     title: 'Insert Theorem / Proof',
@@ -1433,12 +1672,36 @@ export default function App() {
     onSubmit: (v) => { if (v.label) insertCode(`@${v.label}`); }
   });
 
-  const insertLabel = () => setInputModal({
-    title: 'Insert Label',
-    fields: [{ key: 'label', label: 'Label name', default: 'sec:intro', hint: 'Attach to the preceding heading/equation; reference it with @name.' }],
-    submitLabel: 'Add Label',
-    onSubmit: (v) => { if (v.label) insertCode(` <${v.label}>`); }
-  });
+  // Suggest label names from the context around the cursor: a slug of the nearest
+  // heading, plus the conventional prefixes for the element type nearby.
+  const labelSuggestions = (): string[] => {
+    const editor = editorRef.current, model = editor?.getModel();
+    const slug = (s: string) => s.toLowerCase().replace(/\*|_|`/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
+    const out: string[] = [];
+    if (editor && model) {
+      const ln = editor.getPosition()?.lineNumber ?? 1;
+      for (let k = ln; k >= Math.max(1, ln - 8); k--) {
+        const line = model.getLineContent(k);
+        const h = line.match(/^\s*=+\s+(.+?)\s*$/);
+        if (h) { out.push(`sec:${slug(h[1])}`); break; }
+        if (/figure\(|\bimage\(/.test(line)) out.push('fig:');
+        else if (/#table\(|\btable\(/.test(line)) out.push('tab:');
+        else if (/\$|math\.equation/.test(line)) out.push('eq:');
+      }
+    }
+    for (const p of ['eq:', 'fig:', 'tab:', 'sec:']) if (!out.includes(p)) out.push(p);
+    return out;
+  };
+
+  const insertLabel = () => {
+    const sugg = labelSuggestions();
+    setInputModal({
+      title: 'Insert Label',
+      fields: [{ key: 'label', label: 'Label name', default: sugg[0] || 'sec:intro', options: sugg, placeholder: 'eq:energy', hint: 'Attach to the preceding heading / equation / figure; reference it later with @name. Pick a suggestion or type your own.' }],
+      submitLabel: 'Add Label',
+      onSubmit: (v) => { if (v.label) insertCode(` <${v.label}>`); }
+    });
+  };
 
   // Best-effort Typst-math → sympy translation for the compute dialog.
   const typstToSympy = (s: string) => s.replace(/\$/g, '').replace(/\^/g, '**').replace(/\bdif\b/g, 'd').trim();
@@ -1447,10 +1710,7 @@ export default function App() {
   // integrate / numeric) and return the result as a typeset equation. Reuses the
   // existing code runner (equation mode → "Insert as equation").
   const computeSelection = () => {
-    const editor = editorRef.current;
-    const model = editor?.getModel();
-    const sel = editor?.getSelection();
-    const selected = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : '';
+    const { inner: selected } = getSelectionCtx('');
     setInputModal({
       title: 'Compute Selection (sympy)',
       fields: [
@@ -1549,6 +1809,40 @@ export default function App() {
     editor.focus();
   };
 
+  // Number / un-number *this* equation only (independent of the document-wide
+  // toggle). Operates on the selection, or the equation on the current line.
+  // A numbered equation becomes `#math.equation(block: true, numbering: "(1)", $…$)`
+  // (centred + numbered, whatever the global setting); toggling flips it to `none`.
+  const toggleThisEquationNumber = () => {
+    const editor = editorRef.current, model = editor?.getModel();
+    if (!editor || !model) return;
+    editor.focus();
+    const sel = editor.getSelection();
+    let text: string, range: any;
+    if (sel && !sel.isEmpty()) {
+      text = model.getValueInRange(sel); range = sel;
+    } else {
+      const ln = editor.getPosition()?.lineNumber ?? 1;
+      text = model.getLineContent(ln);
+      range = { startLineNumber: ln, startColumn: 1, endLineNumber: ln, endColumn: model.getLineMaxColumn(ln) };
+    }
+    let out: string;
+    const wrapped = text.match(/#math\.equation\(block:\s*true,\s*numbering:\s*(none|"[^"]*"),\s*(\$[\s\S]*\$)\s*\)/);
+    if (wrapped) {
+      // Already an explicit numbered/unnumbered equation → flip its numbering.
+      const flip = wrapped[1] === 'none' ? '"(1)"' : 'none';
+      out = text.replace(wrapped[0], `#math.equation(block: true, numbering: ${flip}, ${wrapped[2]})`);
+    } else {
+      // Find a $…$ (or treat the whole selection as the body) and number it.
+      const eq = text.match(/\$[\s\S]*?\$/);
+      const body = eq ? eq[0].slice(1, -1).trim() : text.trim();
+      const equation = `#math.equation(block: true, numbering: "(1)", $ ${body} $)`;
+      out = eq ? text.replace(eq[0], equation) : equation;
+    }
+    editor.executeEdits('eq-num-one', [{ range, text: out, forceMoveMarkers: true }]);
+    editor.focus();
+  };
+
   // Turn the selected lines into a bullet (-) or numbered (+) list. With no
   // selection, insert a small starter list.
   const makeList = (marker: '-' | '+') => {
@@ -1577,6 +1871,108 @@ export default function App() {
     ensureRule('math.equation(numbering', '#set math.equation(numbering: "(1)")');
     insertCode('\n$\n  a &= b + c \\\n    &= d + e\n$\n\n');
   };
+
+  // Nest / un-nest list items by shifting the selected lines two spaces — Typst
+  // reads indentation as list depth, so this turns items into sub-items.
+  const shiftIndent = (dir: 1 | -1) => {
+    const editor = editorRef.current, model = editor?.getModel();
+    if (!editor || !model) return;
+    editor.focus();
+    const sel = editor.getSelection();
+    if (!sel) return;
+    const from = sel.startLineNumber, to = sel.isEmpty() ? sel.startLineNumber : sel.endLineNumber;
+    const edits: any[] = [];
+    for (let ln = from; ln <= to; ln++) {
+      const t = model.getLineContent(ln);
+      if (dir > 0) {
+        if (t.trim()) edits.push({ range: { startLineNumber: ln, startColumn: 1, endLineNumber: ln, endColumn: 1 }, text: '  ', forceMoveMarkers: true });
+      } else {
+        const m = t.match(/^ {1,2}/);
+        if (m) edits.push({ range: { startLineNumber: ln, startColumn: 1, endLineNumber: ln, endColumn: m[0].length + 1 }, text: '', forceMoveMarkers: true });
+      }
+    }
+    if (edits.length) editor.executeEdits('indent', edits);
+    editor.focus();
+  };
+
+  // Insert a nested list starter (list-inside-list) or a term/definition list.
+  const insertNestedList = () => insertCode('\n- First point\n  - Sub-point\n  - Sub-point\n    + Numbered sub-sub-point\n- Second point\n\n');
+  const insertTermList = () => insertCode('\n/ Term: its definition or explanation.\n/ Second term: another definition.\n\n');
+
+  // --- Text features: callouts, notes, quotes, typographic emphasis ----------
+  // Self-contained callout (no external package): a coloured, left-ruled block
+  // whose colour, icon and title follow the chosen kind.
+  const CALLOUT_SETUP = `#let callout(body, kind: "note") = {
+  let (c, ic, tt) = if kind == "warning" { (orange, "⚠", "Warning") } else if kind == "definition" { (purple, "❖", "Definition") } else if kind == "example" { (green, "▸", "Example") } else if kind == "important" { (red, "‼", "Important") } else { (blue, "ℹ", "Note") }
+  block(fill: c.lighten(90%), stroke: (left: 3pt + c), radius: 4pt, inset: 10pt, width: 100%, breakable: true)[
+    #text(fill: c.darken(15%), weight: "bold")[#ic #h(4pt) #tt]
+    #v(3pt)
+    #body
+  ]
+}`;
+  // Margin note via the `drafting` package: notes auto-stack in the right margin
+  // (no overlap even when several sit close together) and adapt to the page's
+  // actual margin — unlike the old fixed-offset `place`, which collided with
+  // dense text and piled notes on top of each other. Tufte-style: small grey
+  // text, no box.
+  const SIDENOTE_SETUP = `#import "@preview/drafting:0.2.2": margin-note
+#let sidenote(body) = margin-note(stroke: none, text(size: 8.5pt, fill: gray.darken(25%), body))`;
+
+  const insertCallout = () => setInputModal({
+    title: 'Insert Callout / Admonition',
+    fields: [
+      { key: 'kind', label: 'Type', type: 'select', default: 'note', options: ['note', 'important', 'warning', 'definition', 'example'] },
+      { key: 'body', label: 'Content', type: 'textarea', default: 'Your text here.' },
+    ],
+    submitLabel: 'Insert',
+    onSubmit: (v) => { ensureSetup('#let callout', CALLOUT_SETUP); insertCode(`\n#callout(kind: "${v.kind}")[${v.body}]\n\n`); },
+  });
+
+  const insertFootnote = () => {
+    const { editor, model, sel, inner } = getSelectionCtx('note text');
+    if (sel && model && !sel.isEmpty()) replaceOrInsert(sel, editor, model, `#footnote[${inner}]`);
+    else insertCode('#footnote[note text]');
+  };
+
+  const insertSideNote = () => setInputModal({
+    title: 'Insert Margin / Side Note',
+    fields: [{ key: 'body', label: 'Note (appears in the right margin)', type: 'textarea', default: 'side note' }],
+    submitLabel: 'Insert',
+    onSubmit: (v) => { ensureSetup('#let sidenote', SIDENOTE_SETUP); insertCode(`#sidenote[${v.body}]`); },
+  });
+
+  // Insert an empty fenced code block and drop the cursor on the blank line
+  // inside it (⌘⇧B, or Insert → Code → Code Block).
+  const insertCodeBlock = () => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (!editor || !model) { insertCode('\n```\n\n```\n'); return; }
+    const sel = editor.getSelection();
+    const line = sel ? sel.startLineNumber : model.getLineCount();
+    editor.executeEdits('code-block', [{
+      range: { startLineNumber: line, startColumn: 1, endLineNumber: line, endColumn: 1 } as any,
+      text: '```\n\n```\n', forceMoveMarkers: true,
+    }]);
+    editor.setPosition({ lineNumber: line + 1, column: 1 });
+    editor.focus();
+  };
+
+  const insertBlockQuote = () => setInputModal({
+    title: 'Insert Block Quote',
+    fields: [
+      { key: 'body', label: 'Quotation', type: 'textarea', default: 'Quoted text.' },
+      { key: 'author', label: 'Attribution (optional)', default: '', placeholder: 'e.g. Dirac, 1928' },
+    ],
+    submitLabel: 'Insert',
+    onSubmit: (v) => { const attr = v.author ? `attribution: [${v.author}], ` : ''; insertCode(`\n#quote(block: true, ${attr})[${v.body}]\n\n`); },
+  });
+
+  const insertTracking = () => setInputModal({
+    title: 'Letter Spacing (tracking)',
+    fields: [{ key: 'amt', label: 'Tracking (em — try 0.08)', default: '0.08' }],
+    submitLabel: 'Apply',
+    onSubmit: (v) => { const { editor, model, sel, inner } = getSelectionCtx('spaced'); replaceOrInsert(sel, editor, model, `#text(tracking: ${v.amt}em)[${inner}]`); },
+  });
 
   // Change the font size of the selected text (wraps in #text(size: ..pt)[...]).
   const setSelectionFontSize = (pt: string) => {
@@ -1738,7 +2134,7 @@ export default function App() {
   });
 
   return (
-    <div className="app-container" onClick={() => { setActiveMenu(null); setColorPopAt(null); }}>
+    <div className="app-container" onClick={() => { setActiveMenu(null); setColorPopAt(null); setHighlightPopAt(null); setFontSizePopAt(null); }}>
       <header className="header">
         <div className="header-left">
           <div className="logo logo-btn" style={{ fontSize: '0.9rem', gap: '4px' }} title="About Typst Editor" onClick={() => setShowAbout(true)}>
@@ -1771,6 +2167,7 @@ export default function App() {
                     </div>
                   </div>
                   <div className="dropdown-item" onClick={() => { openFolderFromDisk(); setActiveMenu(null); }}>Import Folder into Project...</div>
+                  <div className="dropdown-item" onClick={() => { importFont(); setActiveMenu(null); }}>Import Font (.ttf / .otf)...</div>
                   <div className="dropdown-item" onClick={() => setShowTemplateInstaller(true)}>New from Template...</div>
                   <div className="dropdown-divider"></div>
                   <div className="dropdown-item" onClick={() => { saveActiveFile(); setActiveMenu(null); }}>Save <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘S</span></div>
@@ -1798,6 +2195,7 @@ export default function App() {
               Insert
               {activeMenu === 'insert' && (
                 <div className="dropdown">
+                  <div className="dropdown-header">Structure</div>
                   <div className="dropdown-item has-submenu">
                     <span>Document</span><span className="submenu-arrow">›</span>
                     <div className="submenu">
@@ -1812,16 +2210,21 @@ export default function App() {
                   <div className="dropdown-item has-submenu">
                     <span>Math</span><span className="submenu-arrow">›</span>
                     <div className="submenu">
+                      <div className="dropdown-header">Equations</div>
                       <div className="dropdown-item" onClick={() => { wrapSelection('$', '$'); setActiveMenu(null); }}>Inline Equation <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘E</span></div>
                       <div className="dropdown-item" onClick={() => { insertCode('\n$ E = m c^2 $\n\n'); setActiveMenu(null); }}>Block Equation</div>
                       <div className="dropdown-item" onClick={() => { insertMultilineEquation(); setActiveMenu(null); }}>Multiline / Aligned Equation</div>
                       <div className="dropdown-item" onClick={() => { insertNumberedEquation(); setActiveMenu(null); }}>Numbered Equation... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧E</span></div>
-                      <div className="dropdown-item" onClick={() => { insertMatrix(); setActiveMenu(null); }}>Matrix (delimiters, lines, colour)... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧M</span></div>
+                      <div className="dropdown-header">Templates &amp; Structures</div>
+                      <div className="dropdown-item" onClick={() => { setShowEqGallery(true); setActiveMenu(null); }}>Equation Templates... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧G</span></div>
+                      <div className="dropdown-item" onClick={() => { setShowMatrixStudio(true); setActiveMenu(null); }}>Matrix Studio (fill, borders, code array)... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧M</span></div>
+                      <div className="dropdown-item" onClick={() => { insertMatrix(); setActiveMenu(null); }}>Matrix (augmentation lines)...</div>
                       <div className="dropdown-item" onClick={() => { insertCases(); setActiveMenu(null); }}>Conditional / Piecewise (cases)...</div>
                       <div className="dropdown-item" onClick={() => { insertBrace(); setActiveMenu(null); }}>Over / Under Brace...</div>
                       <div className="dropdown-item" onClick={() => { insertCancel(); setActiveMenu(null); }}>Cancel / Strike Term...</div>
+                      <div className="dropdown-header">Symbols &amp; Compute</div>
                       <div className="dropdown-item" onClick={() => { setShowSymbolPicker(true); setActiveMenu(null); }}>Math &amp; Physics Symbols... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧P</span></div>
-                      <div className="dropdown-item" onClick={() => { setShowSymbolDraw(true); setActiveMenu(null); }}>Draw a Symbol → Typst (experimental)...</div>
+                      <div className="dropdown-item" onClick={() => { setShowSymbolDraw(true); setActiveMenu(null); }}>Draw a Symbol → Typst (experimental)... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧Y</span></div>
                       <div className="dropdown-item" onClick={() => { computeSelection(); setActiveMenu(null); }}>Compute Selection (simplify / solve)... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧U</span></div>
                     </div>
                   </div>
@@ -1843,8 +2246,23 @@ export default function App() {
                     <div className="submenu">
                       <div className="dropdown-item" onClick={() => { makeList('-'); setActiveMenu(null); }}>Bullet List</div>
                       <div className="dropdown-item" onClick={() => { makeList('+'); setActiveMenu(null); }}>Numbered List</div>
+                      <div className="dropdown-item" onClick={() => { insertNestedList(); setActiveMenu(null); }}>Nested List (list-in-list)</div>
+                      <div className="dropdown-item" onClick={() => { insertTermList(); setActiveMenu(null); }}>Term / Definition List</div>
+                      <div className="dropdown-divider"></div>
+                      <div className="dropdown-item" onClick={() => { shiftIndent(1); setActiveMenu(null); }}>Indent → nest deeper <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘]</span></div>
+                      <div className="dropdown-item" onClick={() => { shiftIndent(-1); setActiveMenu(null); }}>Outdent → nest shallower <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘[</span></div>
                     </div>
                   </div>
+                  <div className="dropdown-item has-submenu">
+                    <span>Text &amp; Notes</span><span className="submenu-arrow">›</span>
+                    <div className="submenu">
+                      <div className="dropdown-item" onClick={() => { insertCallout(); setActiveMenu(null); }}>Callout / Admonition box...</div>
+                      <div className="dropdown-item" onClick={() => { insertBlockQuote(); setActiveMenu(null); }}>Block Quote...</div>
+                      <div className="dropdown-item" onClick={() => { insertFootnote(); setActiveMenu(null); }}>Footnote</div>
+                      <div className="dropdown-item" onClick={() => { insertSideNote(); setActiveMenu(null); }}>Margin / Side Note...</div>
+                    </div>
+                  </div>
+                  <div className="dropdown-header">Figures &amp; Data</div>
                   <div className="dropdown-item has-submenu">
                     <span>Media &amp; Tables</span><span className="submenu-arrow">›</span>
                     <div className="submenu">
@@ -1852,23 +2270,30 @@ export default function App() {
                       <div className="dropdown-item" onClick={() => { insertImage(); setActiveMenu(null); }}>Image...</div>
                       <div className="dropdown-item" onClick={() => { insertTable(); setActiveMenu(null); }}>Table...</div>
                       <div className="dropdown-item" onClick={() => { insertDataFile(); setActiveMenu(null); }}>Import Data (CSV/JSON)...</div>
-                      <div className="dropdown-item" onClick={() => { insertCode('\n```rust\nfn main() {\n  println!("Hello World!");\n}\n```\n'); setActiveMenu(null); }}>Code Block</div>
+                      <div className="dropdown-item" onClick={() => { insertCodeBlock(); setActiveMenu(null); }}>Code Block <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧B</span></div>
                     </div>
                   </div>
+                  <div className="dropdown-item" onClick={() => { const sel = editorRef.current?.getSelection(); const model = editorRef.current?.getModel(); const code = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : ''; setShowImagePlacer(code ? code : true); setActiveMenu(null); }}>Place Image (wrap your text / float / below)...</div>
                   <div className="dropdown-item has-submenu">
                     <span>Plots</span><span className="submenu-arrow">›</span>
                     <div className="submenu">
+                      <div className="dropdown-header">2D</div>
                       <div className="dropdown-item" onClick={() => { setShowDiagramBuilder(true); setActiveMenu(null); }}>Diagram / Plot (2D, cetz)...</div>
+                      <div className="dropdown-header">3D</div>
                       <div className="dropdown-item" onClick={() => { insertCetz3D(); setActiveMenu(null); }}>3D Surface (cetz)...</div>
                       <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'python', initialCode: SURFACE_3D_TEMPLATE }); setActiveMenu(null); }}>3D Surface (Python/matplotlib)...</div>
                       <div className="dropdown-item" onClick={() => { setShowPlot3D(true); setActiveMenu(null); }}>3D Plot Studio (rotate &amp; pick view)...</div>
+                      <div className="dropdown-header">Diagrams</div>
                       <div className="dropdown-item" onClick={() => { setShowQuiver(true); setActiveMenu(null); }}>Commutative Diagram (quiver)...</div>
                       <div className="dropdown-item" onClick={() => { setShowFeynman(true); setActiveMenu(null); }}>Feynman Diagram (visual)... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧F</span></div>
                     </div>
                   </div>
+                  <div className="dropdown-header">Compute &amp; References</div>
                   <div className="dropdown-item has-submenu">
                     <span>Compute</span><span className="submenu-arrow">›</span>
                     <div className="submenu">
+                      <div className="dropdown-item" onClick={() => { setShowFlowchart(true); setActiveMenu(null); }}>Flowchart → Code (build logic visually)... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧L</span></div>
+                      <div className="dropdown-divider"></div>
                       <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'python' }); setActiveMenu(null); }}>Run Python... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧K</span></div>
                       <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'julia' }); setActiveMenu(null); }}>Run Julia...</div>
                       <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'wolfram' }); setActiveMenu(null); }}>Run Wolfram...</div>
@@ -1892,20 +2317,26 @@ export default function App() {
               Formatting
               {activeMenu === 'formatting' && (
                 <div className="dropdown">
+                  <div className="dropdown-header">Text</div>
                   <div className="dropdown-item" onClick={() => { wrapSelection('*', '*'); setActiveMenu(null); }}>Bold <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘B</span></div>
                   <div className="dropdown-item" onClick={() => { wrapSelection('_', '_'); setActiveMenu(null); }}>Italic <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘I</span></div>
                   <div className="dropdown-item" onClick={() => { wrapSelection('#super[', ']'); setActiveMenu(null); }}>Superscript</div>
                   <div className="dropdown-item" onClick={() => { wrapSelection('#sub[', ']'); setActiveMenu(null); }}>Subscript</div>
-                  <div className="dropdown-divider"></div>
+                  <div className="dropdown-header">Colour &amp; Emphasis</div>
                   <div className="dropdown-item" onClick={() => { insertTextColor(); setActiveMenu(null); }}>Text Colour...</div>
                   <div className="dropdown-item" onClick={() => { insertUnderline(); setActiveMenu(null); }}>Underline (colour, background)...</div>
                   <div className="dropdown-item" onClick={() => { insertHighlight(); setActiveMenu(null); }}>Highlight / Background Colour...</div>
                   <div className="dropdown-item" onClick={() => { insertCancel(); setActiveMenu(null); }}>Cross Out / Strike Through...</div>
-                  <div className="dropdown-divider"></div>
+                  <div className="dropdown-header">Layout</div>
                   <div className="dropdown-item" onClick={() => { insertBox(); setActiveMenu(null); }}>Box Selection (fill, border, texture)...</div>
                   <div className="dropdown-item" onClick={() => { setSelectionFontSizePrompt(); setActiveMenu(null); }}>Font Size...</div>
                   <div className="dropdown-item" onClick={() => { insertAlign(); setActiveMenu(null); }}>Align Content...</div>
                   <div className="dropdown-item" onClick={() => { insertRotate(); setActiveMenu(null); }}>Rotate (content or equation)...</div>
+                  <div className="dropdown-header">Typography</div>
+                  <div className="dropdown-item" onClick={() => { wrapSelection('#smallcaps[', ']'); setActiveMenu(null); }}>Small Caps</div>
+                  <div className="dropdown-item" onClick={() => { wrapSelection('#strike[', ']'); setActiveMenu(null); }}>Strikethrough (text)</div>
+                  <div className="dropdown-item" onClick={() => { insertTracking(); setActiveMenu(null); }}>Letter Spacing...</div>
+                  <div className="dropdown-item" onClick={() => { insertCode('~'); setActiveMenu(null); }}>Non-breaking Space  (~)</div>
                 </div>
               )}
             </div>
@@ -1945,16 +2376,18 @@ export default function App() {
               ? <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
               : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="M4.93 4.93l1.41 1.41"></path><path d="M17.66 17.66l1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="M4.93 19.07l1.41-1.41"></path><path d="M17.66 6.34l1.41-1.41"></path></svg>}
           </button>
-          <div style={{ opacity: 0.8, display: 'flex', alignItems: 'center' }} title="Words / Characters">
-            {stats.words} Words
+          <div className="header-meta" title={pdfWords != null ? 'Words in the rendered document' : 'Words in the source (compile to count the rendered document)'}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="4" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="14" y2="17"></line></svg>
+            {pdfWords != null ? pdfWords : stats.words} words
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', cursor: 'pointer', opacity: 0.8 }} title="History" onClick={() => setShowHistoryModal(true)}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v4"></path><path d="M12 18v4"></path><path d="M4.93 4.93l2.83 2.83"></path><path d="M16.24 16.24l2.83 2.83"></path><path d="M2 12h4"></path><path d="M18 12h4"></path><path d="M4.93 19.07l2.83-2.83"></path><path d="M16.24 7.76l2.83-2.83"></path></svg>
-          </div>
-          <a href="https://github.com/aburousan/typsteditor" target="_blank" rel="noopener noreferrer" title="Source code on GitHub" style={{ display: 'flex', alignItems: 'center', color: 'inherit', opacity: 0.8 }}>
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 .5C5.73.5.5 5.73.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.88-1.54-3.88-1.54-.53-1.34-1.3-1.7-1.3-1.7-1.06-.72.08-.71.08-.71 1.17.08 1.79 1.2 1.79 1.2 1.04 1.79 2.73 1.27 3.4.97.11-.75.41-1.27.74-1.56-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 2.9-.39c.98 0 1.97.13 2.9.39 2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.25 5.68.42.36.8 1.08.8 2.18 0 1.57-.01 2.84-.01 3.23 0 .31.21.68.8.56A11.51 11.51 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5z"></path></svg>
+          <div className="header-sep"></div>
+          <button className="header-icon-btn" title="Version history" onClick={() => setShowHistoryModal(true)}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v5h5"></path><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"></path><path d="M12 7v5l4 2"></path></svg>
+          </button>
+          <a className="header-icon-btn" href="https://github.com/aburousan/typsteditor" target="_blank" rel="noopener noreferrer" title="Source code on GitHub">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 .5C5.73.5.5 5.73.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.88-1.54-3.88-1.54-.53-1.34-1.3-1.7-1.3-1.7-1.06-.72.08-.71.08-.71 1.17.08 1.79 1.2 1.79 1.2 1.04 1.79 2.73 1.27 3.4.97.11-.75.41-1.27.74-1.56-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 2.9-.39c.98 0 1.97.13 2.9.39 2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.25 5.68.42.36.8 1.08.8 2.18 0 1.57-.01 2.84-.01 3.23 0 .31.21.68.8.56A11.51 11.51 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5z"></path></svg>
           </a>
-          <button style={{ background: '#10b981', color: 'white', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '6px' }} onClick={() => setShowDriveSync(true)}>
+          <button className="btn-share" onClick={() => setShowDriveSync(true)}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg> Share
           </button>
         </div>
@@ -1968,10 +2401,33 @@ export default function App() {
           
           <button className="tool-btn" onClick={() => editorRef.current?.trigger('source', 'undo', null)} title="Undo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg></button>
           <button className="tool-btn" onClick={() => editorRef.current?.trigger('source', 'redo', null)} title="Redo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 14 20 9 15 4"></polyline><path d="M4 20v-7a4 4 0 0 1 4-4h12"></path></svg></button>
-          <div className="toolbar-divider" style={{ width: '1px', height: '20px', background: 'var(--border-color)', margin: '0 4px' }}></div>
-          <button className="tool-btn" onClick={() => wrapSelection('*', '*')} title="Bold"><b>B</b></button>
-          <button className="tool-btn" onClick={() => wrapSelection('_', '_')} title="Italic"><i>I</i></button>
-          <button className="tool-btn" onClick={() => wrapSelection('#underline[', ']')} title="Underline"><u>U</u></button>
+          <div className="toolbar-divider"></div>
+          <button className="tool-btn" onClick={() => wrapSelection('*', '*')} title="Bold  (⌘B)"><b>B</b></button>
+          <button className="tool-btn" onClick={() => wrapSelection('_', '_')} title="Italic  (⌘I)"><i>I</i></button>
+          <button className="tool-btn" title="Text size — resize the selected text"
+            onClick={(e) => {
+              e.stopPropagation();
+              const r = e.currentTarget.getBoundingClientRect();
+              setColorPopAt(null); setHighlightPopAt(null);
+              setFontSizePopAt(p => p ? null : { x: r.left, y: r.bottom + 6 });
+            }}>
+            <span style={{ fontWeight: 700, letterSpacing: '-1px' }}><span style={{ fontSize: 15 }}>A</span><span style={{ fontSize: 10 }}>A</span></span>
+            <span style={{ fontSize: 8, opacity: 0.7, marginLeft: 1 }}>▾</span>
+          </button>
+          {fontSizePopAt && (
+            <div className="fontsize-menu" style={{ position: 'fixed', left: fontSizePopAt.x, top: fontSizePopAt.y }} onClick={e => e.stopPropagation()}>
+              <div className="fontsize-menu-scroll">
+                {FONT_SIZE_PRESETS.map(s => (
+                  <button key={s} className={`fontsize-item ${s === fontSizeVal ? 'active' : ''}`}
+                    onClick={() => { setFontSizeVal(s); setSelectionFontSize(String(s)); setFontSizePopAt(null); }}>
+                    {s}<span className="fontsize-item-unit">pt</span>
+                  </button>
+                ))}
+              </div>
+              <button className="fontsize-item fontsize-custom"
+                onClick={() => { setFontSizePopAt(null); setSelectionFontSizePrompt(); }}>Custom…</button>
+            </div>
+          )}
           <button className="tool-btn" title="Text colour — pick a colour to apply to the selection"
             onClick={(e) => {
               e.stopPropagation();
@@ -1998,43 +2454,57 @@ export default function App() {
               <button className="color-more" onClick={() => { setColorPopAt(null); insertTextColor(); }}>Full colour grid…</button>
             </div>
           )}
-          <button className="tool-btn" onClick={() => wrapSelection('#super[', ']')} title="Superscript">x²</button>
-          <button className="tool-btn" onClick={() => wrapSelection('#sub[', ']')} title="Subscript">x₂</button>
-          <button className="tool-btn" onClick={insertWebLink} title="Insert Web Link"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></button>
-          <button className="tool-btn" onClick={() => insertCode('#image("path.png", width: 80%)')} title="Image"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg></button>
-          <button className="tool-btn" onClick={() => wrapSelection('$', '$')} title="Math"><b>∑</b></button>
-          <div className="toolbar-divider" style={{ width: '1px', height: '20px', background: 'var(--border-color)', margin: '0 4px' }}></div>
-          <button className="tool-btn" onClick={() => wrapSelection('#align(left)[', ']')} title="Align Left"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="17" y1="6" x2="3" y2="6"></line><line x1="21" y1="12" x2="3" y2="12"></line><line x1="17" y1="18" x2="3" y2="18"></line></svg></button>
-          <button className="tool-btn" onClick={() => wrapSelection('#align(center)[', ']')} title="Align Center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="6"></line><line x1="21" y1="12" x2="3" y2="12"></line><line x1="18" y1="18" x2="6" y2="18"></line></svg></button>
-          <button className="tool-btn" onClick={() => wrapSelection('#align(right)[', ']')} title="Align Right"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="21" y1="6" x2="7" y2="6"></line><line x1="21" y1="12" x2="3" y2="12"></line><line x1="21" y1="18" x2="7" y2="18"></line></svg></button>
-          <div className="toolbar-divider" style={{ width: '1px', height: '20px', background: 'var(--border-color)', margin: '0 4px' }}></div>
-          <button className="tool-btn" onClick={insertLabel} title="Add Label (anchor)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg></button>
-          <button className="tool-btn" onClick={insertCrossRef} title="Cross-reference (@label)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7V4h16v3"></path><path d="M9 20h6"></path><path d="M12 4v16"></path></svg><span style={{ fontWeight: 700, marginLeft: -2 }}>@</span></button>
-          <button className="tool-btn" onClick={toggleNumbering} title="Toggle Numbering (⌘⇧N)"><span style={{ fontWeight: 700, fontSize: 13 }}>#1</span></button>
-          <div className="toolbar-divider" style={{ width: '1px', height: '20px', background: 'var(--border-color)', margin: '0 4px' }}></div>
-          <button className="tool-btn" onClick={() => makeList('-')} title="Bullet List"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><circle cx="3.5" cy="6" r="1.2" fill="currentColor"></circle><circle cx="3.5" cy="12" r="1.2" fill="currentColor"></circle><circle cx="3.5" cy="18" r="1.2" fill="currentColor"></circle></svg></button>
-          <button className="tool-btn" onClick={() => makeList('+')} title="Numbered List"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="10" y1="6" x2="21" y2="6"></line><line x1="10" y1="12" x2="21" y2="12"></line><line x1="10" y1="18" x2="21" y2="18"></line><text x="2" y="8" fontSize="7" fill="currentColor" stroke="none">1</text><text x="2" y="14" fontSize="7" fill="currentColor" stroke="none">2</text><text x="2" y="20" fontSize="7" fill="currentColor" stroke="none">3</text></svg></button>
-          <button className="tool-btn" onClick={insertMultilineEquation} title="Multiline / Aligned Equation"><span style={{ fontWeight: 700, fontSize: 13 }}>≣</span></button>
-          <select className="fontsize-select" defaultValue="" onChange={(e) => { setSelectionFontSize(e.target.value); e.target.value = ''; }} title="Font size of selection">
-            <option value="" disabled>A↕</option>
-            <option value="8">8pt</option>
-            <option value="10">10pt</option>
-            <option value="11">11pt</option>
-            <option value="12">12pt</option>
-            <option value="14">14pt</option>
-            <option value="17">17pt</option>
-            <option value="20">20pt</option>
-            <option value="24">24pt</option>
-          </select>
-          <div className="toolbar-divider" style={{ width: '1px', height: '20px', background: 'var(--border-color)', margin: '0 4px' }}></div>
-          <button className="tool-btn" onClick={insertHeading} title="Heading"><b style={{ fontSize: 14 }}>H</b></button>
-          <button className="tool-btn" onClick={insertNumberedEquation} title="Numbered Equation"><span style={{ fontStyle: 'italic' }}>f(x)</span></button>
+          <button className="tool-btn" title="Highlight — mark the selection with a background colour"
+            onClick={(e) => {
+              e.stopPropagation();
+              const r = e.currentTarget.getBoundingClientRect();
+              setColorPopAt(null); setFontSizePopAt(null);
+              setHighlightPopAt(p => p ? null : { x: r.left, y: r.bottom + 6 });
+            }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M9 11l-6 6v3h3l6-6"></path><path d="M22 6l-4-4-9 9 4 4z"></path></svg>
+            <span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: 2, background: highlightColor, marginLeft: 2, border: '1px solid rgba(0,0,0,0.15)' }}></span>
+          </button>
+          {highlightPopAt && (
+            <div className="color-pop" style={{ position: 'fixed', left: highlightPopAt.x, top: highlightPopAt.y }} onClick={e => e.stopPropagation()}>
+              {HIGHLIGHT_COLORS.map(c => (
+                <button key={c} className="color-swatch" style={{ background: c, boxShadow: c === highlightColor ? '0 0 0 2px var(--accent)' : 'none' }}
+                  onClick={() => { setHighlightColor(c); setHighlightPopAt(null); wrapSelection(`#highlight(fill: rgb("${c}"))[`, ']'); }} title={`Highlight the selection ${c}`} />
+              ))}
+              <label className="color-swatch color-custom" title="Pick a custom highlight colour, then Apply below">
+                <input type="color" value={highlightColor} onChange={e => setHighlightColor(e.target.value)} />
+                <span>+</span>
+              </label>
+              <button className="color-more color-apply" title={`Highlight the selection ${highlightColor}`}
+                onClick={() => { setHighlightPopAt(null); wrapSelection(`#highlight(fill: rgb("${highlightColor}"))[`, ']'); }}>
+                <span className="color-chip" style={{ background: highlightColor }}></span> Highlight selection
+              </button>
+              <button className="color-more" onClick={() => { setHighlightPopAt(null); insertHighlight(); }}>Full colour grid…</button>
+            </div>
+          )}
+          <div className="toolbar-divider"></div>
+          {/* Math — the core of physics/maths note-taking */}
+          <button className="tool-btn" onClick={() => wrapSelection('$', '$')} title="Inline math — a symbol in running text   $x$   (⌘E)"><span style={{ fontFamily: "'iA Writer Mono', ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12.5, fontWeight: 600, letterSpacing: '-0.5px' }}>$x$</span></button>
+          <button className="tool-btn" onClick={insertMultilineEquation} title="Display / aligned equation (its own line)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="3" y="5" width="18" height="14" rx="2.5"></rect><line x1="8" y1="10.5" x2="16" y2="10.5" strokeWidth="2"></line><line x1="8" y1="13.5" x2="16" y2="13.5" strokeWidth="2"></line></svg></button>
+          <button className="tool-btn" onClick={toggleEquationNumbering} title="Toggle equation numbering for the whole document  (1), (2), … on/off"><span style={{ fontWeight: 700, fontSize: 12.5, letterSpacing: '-0.5px' }}>(1)</span></button>
+          <button className="tool-btn" onClick={toggleThisEquationNumber} title="Number / un-number THIS equation (the selection or current line)"><span style={{ fontWeight: 700, fontSize: 14 }}>№</span></button>
+          <button className="tool-btn" onClick={() => wrapSelection('#align(center)[', ']')} title="Center the selection on the page"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="6"></line><line x1="21" y1="12" x2="3" y2="12"></line><line x1="18" y1="18" x2="6" y2="18"></line></svg></button>
+          <button className="tool-btn" onClick={() => setShowMatrixStudio(true)} title="Matrix — visual grid editor  (⌘⇧M)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9"><path d="M7 3H4v18h3"></path><path d="M17 3h3v18h-3"></path><circle cx="9.5" cy="9" r="1.15" fill="currentColor" stroke="none"></circle><circle cx="14.5" cy="9" r="1.15" fill="currentColor" stroke="none"></circle><circle cx="9.5" cy="15" r="1.15" fill="currentColor" stroke="none"></circle><circle cx="14.5" cy="15" r="1.15" fill="currentColor" stroke="none"></circle></svg></button>
+          <button className="tool-btn" onClick={() => setShowSymbolPicker(true)} title="Greek &amp; physics symbols  (⌘⇧P)"><b style={{ fontSize: 15 }}>Ω</b></button>
+          <button className="tool-btn" onClick={() => setShowSymbolDraw(true)} title="Draw a symbol → find its Typst name (sketch it with the mouse)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"></path><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"></path><path d="M2 2l7.586 7.586"></path><circle cx="11" cy="11" r="2"></circle></svg></button>
+          <div className="toolbar-divider"></div>
+          {/* Structure */}
+          <button className="tool-btn" onClick={insertHeading} title="Heading / section"><b style={{ fontSize: 14 }}>H</b></button>
+          <button className="tool-btn" onClick={() => makeList('-')} title="Bullet list"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><circle cx="3.5" cy="6" r="1.2" fill="currentColor"></circle><circle cx="3.5" cy="12" r="1.2" fill="currentColor"></circle><circle cx="3.5" cy="18" r="1.2" fill="currentColor"></circle></svg></button>
+          <button className="tool-btn" onClick={() => makeList('+')} title="Numbered list"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="10" y1="6" x2="21" y2="6"></line><line x1="10" y1="12" x2="21" y2="12"></line><line x1="10" y1="18" x2="21" y2="18"></line><text x="2" y="8" fontSize="7" fill="currentColor" stroke="none">1</text><text x="2" y="14" fontSize="7" fill="currentColor" stroke="none">2</text><text x="2" y="20" fontSize="7" fill="currentColor" stroke="none">3</text></svg></button>
+          <div className="toolbar-divider"></div>
+          {/* Figures, tables, references */}
+          <button className="tool-btn" onClick={wrapInFigure} title="Figure — image with caption &amp; number"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="14" rx="1"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 13 16 9 5 17"></polyline><line x1="7" y1="21" x2="17" y2="21"></line></svg></button>
           <button className="tool-btn" onClick={insertTable} title="Table"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="1"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line><line x1="9" y1="3" x2="9" y2="21"></line></svg></button>
-          <button className="tool-btn" onClick={wrapInFigure} title="Wrap selection in a numbered Figure (caption + number)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="14" rx="1"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 13 16 9 5 17"></polyline><line x1="7" y1="21" x2="17" y2="21"></line></svg></button>
-          <button className="tool-btn" onClick={() => setShowSymbolPicker(true)} title="Math & Physics Symbols"><b>Ω</b></button>
-          <button className="tool-btn" onClick={() => setShowSymbolDraw(true)} title="Draw a symbol → Typst code (experimental)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 19l7-7 3 3-7 7-3-3z"></path><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"></path><path d="M2 2l7.586 7.586"></path><circle cx="11" cy="11" r="2"></circle></svg></button>
-          <button className="tool-btn" onClick={() => setShowBibManager(true)} title="Citations & Bibliography (DOI/arXiv)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></button>
-          <button className="tool-btn" onClick={() => setCodeRunner({})} title="Run Code / Live Output"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg></button>
+          <button className="tool-btn" onClick={insertLabel} title="Add label / tag (anchor) — reference it later with @name"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg></button>
+          <button className="tool-btn" onClick={insertCrossRef} title="Cross-reference a labelled equation / figure / section  (@)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></button>
+          <div className="toolbar-divider"></div>
+          <button className="tool-btn" onClick={insertCodeBlock} title="Code block — insert a fenced ``` code block"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg></button>
+          <button className="tool-btn" onClick={() => setCodeRunner({})} title="Run code — Python / Julia / Wolfram → live output"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg></button>
         </div>
 
         <div className="toolbar-group">
@@ -2147,39 +2617,25 @@ export default function App() {
                 beforeMount={(monacoInstance) => setupTypstLanguage(monacoInstance)}
                 onMount={(e, monacoInstance) => {
                   editorRef.current = e;
+                  // Overleaf-style image-path autocomplete: quick-suggest is off
+                  // inside strings, so as the user types the path in image("…")
+                  // we re-open the file suggestions on every keystroke.
+                  (e as any).onDidType(() => {
+                    const pos = e.getPosition(); const model = e.getModel();
+                    if (!pos || !model) return;
+                    const before = model.getLineContent(pos.lineNumber).slice(0, pos.column - 1);
+                    if (/\bimage\(\s*"[^"]*$/.test(before)) e.trigger('image-path', 'editor.action.triggerSuggest', {});
+                  });
                   // Ensure our custom themes are applied on the very first paint
                   // (otherwise the editor briefly renders in the default light theme).
                   monacoInstance.editor.setTheme(theme);
-                  // Force-disable mouse hover (the options prop alone isn't always
-                  // honoured); docs are on right-click instead.
-                  e.updateOptions({ hover: { enabled: false } });
+                  // Tinymist LSP provides hover documentation now.
+                  e.updateOptions({ hover: { enabled: true, delay: 300 } });
+                  // Redo on ⌘Y (Windows-style), in addition to Monaco's default ⌘⇧Z.
+                  e.addCommand(monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.KeyY, () => e.trigger('keyboard', 'redo', null));
                   const m = e.getModel();
                   if (m) { const last = m.getLineCount(); e.setPosition({ lineNumber: last, column: m.getLineMaxColumn(last) }); }
-                  // Right-click (or ⌘⇧D) → show Typst documentation for the symbol
-                  // under the cursor in a small popup near the cursor.
-                  e.addAction({
-                    id: 'typst.showDocs',
-                    label: 'Show Typst Documentation',
-                    contextMenuGroupId: 'navigation',
-                    contextMenuOrder: 0.5,
-                    keybindings: [monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyMod.Shift | monacoInstance.KeyCode.KeyD],
-                    run: (ed: any) => {
-                      const pos = ed.getPosition(); const model = ed.getModel();
-                      if (!pos || !model) return;
-                      const w = model.getWordAtPosition(pos);
-                      if (!w) { setDocPopup(null); return; }
-                      const line = model.getLineContent(pos.lineNumber);
-                      let s = w.startColumn - 1, en = w.endColumn - 1;
-                      while (s > 0 && /[\w.-]/.test(line[s - 1])) s--;
-                      while (en < line.length && /[\w.-]/.test(line[en])) en++;
-                      const full = line.slice(s, en).replace(/^[.-]+|[.-]+$/g, '');
-                      const info = lookupTypstDoc(w.word, full);
-                      if (!info) { setDocPopup({ notFound: w.word } as any); return; }
-                      const vp = ed.getScrolledVisiblePosition(pos);
-                      const rect = ed.getDomNode()?.getBoundingClientRect();
-                      setDocPopup({ info, x: (rect?.left || 0) + (vp?.left || 0), y: (rect?.top || 0) + (vp?.top || 0) + 22 });
-                    },
-                  });
+
                 }}
                 options={{
                   automaticLayout: true,
@@ -2187,17 +2643,31 @@ export default function App() {
                   wordWrap: 'on',
                   // Only offer our Typst completions — no generic word/HTML noise.
                   wordBasedSuggestions: 'off',
+                  // Autocomplete behaviour, set explicitly so it never depends on
+                  // Monaco version defaults: pop as you type (incl. inside #code),
+                  // let Tab/Enter accept, and float snippets (if / for / let …) up top.
+                  quickSuggestions: { other: true, comments: false, strings: false },
+                  quickSuggestionsDelay: 10,
+                  suggestOnTriggerCharacters: true,
+                  acceptSuggestionOnEnter: 'on',
+                  tabCompletion: 'on',
+                  snippetSuggestions: 'top',
+                  suggest: { showSnippets: true, snippetsPreventQuickSuggestions: false },
                   fontSize: editorFontSize,
                   lineNumbers: 'on',
+                  // 2-space soft tabs so ⌘] / ⌘[ nest list items exactly one
+                  // Typst list level (indentation = depth) instead of jumping 4.
+                  tabSize: 2,
+                  insertSpaces: true,
+                  detectIndentation: false,
                   scrollBeyondLastLine: false,
                   smoothScrolling: true,
                   padding: { top: 16, bottom: 16 },
                   autoClosingBrackets: 'always',
                   autoClosingQuotes: 'always',
                   bracketPairColorization: { enabled: true },
-                  // Docs are shown on right-click ("Show Typst Documentation"),
-                  // not on mouse-hover, so the hover popup is disabled.
-                  hover: { enabled: false },
+                  // Tinymist LSP provides hover documentation via the backend.
+                  hover: { enabled: true, delay: 300 },
                 }}
               />
             ) : (
@@ -2218,10 +2688,45 @@ export default function App() {
           document.body.classList.add('is-resizing');
         }} />
         <div className="preview-pane" style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', position: 'relative', backgroundColor: '#ffffff' }}>
-          {pdfUrl ? (
-            <PdfPreview url={pdfUrl} onWordClick={jumpToWord} />
+          {compileError ? (
+            (() => {
+              const errs = problems.filter(p => p.severity === 'error');
+              return (
+                <div className="preview-error">
+                  <div className="preview-error-card">
+                    <div className="preview-error-title">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+                      Compilation failed
+                    </div>
+                    <div className="preview-error-sub">
+                      Typst couldn't build this document, so the preview isn't updated.
+                      {errs.length > 0
+                        ? ` Fix the ${errs.length} error${errs.length > 1 ? 's' : ''} below — click one to jump to it.`
+                        : ''}
+                    </div>
+                    {errs.length > 0 ? (
+                      <ul className="preview-error-list">
+                        {errs.map((p, i) => (
+                          <li key={i} className="preview-error-item" onClick={() => jumpToProblem(p)} title="Jump to this line">
+                            {p.line != null && <span className="preview-error-loc">{(p.file || activeTabPath)}:{p.line}{p.col != null ? `:${p.col}` : ''}</span>}
+                            <span className="preview-error-msg">{p.message}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <pre className="preview-error-raw">{compileError}</pre>
+                    )}
+                    <div className="preview-error-foot">{isCompiling ? 'Recompiling…' : 'The preview returns automatically as soon as it compiles cleanly.'}</div>
+                  </div>
+                </div>
+              );
+            })()
+          ) : isCompiling && !pdfUrl ? (
+            <div className="empty-preview">Generating PDF…</div>
+          ) : pdfUrl ? (
+            <PdfPreview url={pdfUrl} onWordClick={jumpToWord} onWordCount={handlePdfWordCount} />
           ) : (
-            <div className="empty-preview">{isCompiling ? 'Generating PDF...' : 'No preview available'}</div>
+            <div className="empty-preview">Nothing to preview yet — write some Typst and it renders here.</div>
           )}
         </div>
       </div>
@@ -2234,6 +2739,10 @@ export default function App() {
       {showTemplateInstaller && <TemplateInstaller onClose={() => setShowTemplateInstaller(false)} onInsert={handleInitTemplate} />}
       {showDiagramBuilder && <DiagramBuilder onClose={() => setShowDiagramBuilder(false)} onInsert={(code) => { insertCode(code); setShowDiagramBuilder(false); }} />}
       {showFeynman && <Suspense fallback={null}><FeynmanBuilder onClose={() => setShowFeynman(false)} onInsert={(code) => { insertCode(code); setShowFeynman(false); }} /></Suspense>}
+      {showEqGallery && <Suspense fallback={null}><EquationGallery onClose={() => setShowEqGallery(false)} onInsert={insertEqTemplate} /></Suspense>}
+      {showMatrixStudio && <Suspense fallback={null}><MatrixStudio onClose={() => setShowMatrixStudio(false)} onInsert={insertMatrixBody} /></Suspense>}
+      {showImagePlacer && <Suspense fallback={null}><ImagePlacer onClose={() => setShowImagePlacer(false)} onEnsureImport={(imp) => { const m = editorRef.current?.getModel(); if (m && !m.getValue().includes(imp.trim())) insertAtTop(imp); }} onInsert={(code) => { if (typeof showImagePlacer === 'string') { const { editor, model, sel } = getSelectionCtx(''); if (sel && editor && model && !sel.isEmpty()) { editor.executeEdits('re-place', [{ range: sel, text: code, forceMoveMarkers: true }]); editor.focus(); } else insertCode(code); } else insertCode(code); fetchTree(); }} workspaceImages={workspaceImages} selectedCode={typeof showImagePlacer === 'string' ? showImagePlacer : undefined} /></Suspense>}
+      {showFlowchart && <Suspense fallback={null}><FlowchartCoder onClose={() => setShowFlowchart(false)} onInsert={(code) => { if (code.includes('fc-result(')) ensureSetup('#let fc-result', '#let fc-result(v) = box(inset: (x: 9pt, y: 6pt), radius: 6pt, fill: rgb(238, 242, 255), stroke: 0.6pt + rgb(165, 180, 252))[*Result:* #v]'); insertCode(`\n${code}\n`); setShowFlowchart(false); }} /></Suspense>}
       {showAbout && (
         <div className="modal-overlay" onClick={() => setShowAbout(false)}>
           <div className="modal-content about-modal" onClick={e => e.stopPropagation()}>
@@ -2241,6 +2750,10 @@ export default function App() {
             <h2 style={{ margin: '10px 0 2px' }}>Typst Editor</h2>
             <div className="about-version">Version {__APP_VERSION__}</div>
             <div className="about-author">Created by <a href="https://rousan.netlify.app/" target="_blank" rel="noreferrer" style={{ color: 'inherit', fontWeight: 600, textDecoration: 'underline', textDecorationColor: 'var(--accent)' }}>Kazi Abu Rousan</a></div>
+            <a className="about-coffee" href="https://buymeacoffee.com/rousan" target="_blank" rel="noreferrer" title="Support the project — buy me a coffee">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1"></path><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"></path><line x1="6" y1="1" x2="6" y2="4"></line><line x1="10" y1="1" x2="10" y2="4"></line><line x1="14" y1="1" x2="14" y2="4"></line></svg>
+              Buy me a coffee
+            </a>
             <div className="about-links">
               <a href="https://github.com/aburousan/typsteditor" target="_blank" rel="noreferrer">GitHub</a>
               <span>·</span>
@@ -2260,26 +2773,6 @@ export default function App() {
         fontSize={editorFontSize} onFontSize={setEditorFontSize}
         compileDelay={compileDelay} onCompileDelay={setCompileDelay} />}
       {showQuiver && <QuiverDiagram onClose={() => setShowQuiver(false)} onInsert={insertQuiverDiagram} />}
-      {docPopup && (
-        <>
-          <div style={{ position: 'fixed', inset: 0, zIndex: 998 }} onClick={() => setDocPopup(null)} onContextMenu={(e) => { e.preventDefault(); setDocPopup(null); }} />
-          <div style={{ position: 'fixed', left: Math.min(('x' in docPopup ? docPopup.x : 0), window.innerWidth - 380), top: 'y' in docPopup ? docPopup.y : 0, zIndex: 999, width: 360, maxHeight: 360, overflow: 'auto', background: 'var(--panel-bg, #1e293b)', color: 'var(--text-color, #e2e8f0)', border: '1px solid var(--border-color, #334155)', borderRadius: 8, boxShadow: '0 8px 30px rgba(0,0,0,0.5)', padding: 14, fontSize: 13 }} onClick={(e) => e.stopPropagation()}>
-            {'notFound' in docPopup ? (
-              <div style={{ opacity: 0.8 }}>No Typst documentation found for <code>{docPopup.notFound}</code>. Try right-clicking directly on a function name (e.g. <code>figure</code>, <code>table</code>, <code>vec</code>).</div>
-            ) : (
-              <>
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
-                  <strong style={{ fontSize: 15 }}>{docPopup.info.key}</strong>
-                  {docPopup.info.detail && <span style={{ fontSize: 11, opacity: 0.7, border: '1px solid var(--border-color, #334155)', borderRadius: 4, padding: '1px 6px' }}>{docPopup.info.detail}</span>}
-                </div>
-                {docPopup.info.doc && <div style={{ lineHeight: 1.5, marginBottom: 8 }}>{docPopup.info.doc}</div>}
-                <pre style={{ background: 'var(--bg-color, #0f172a)', borderRadius: 6, padding: '8px 10px', margin: '0 0 10px', overflowX: 'auto', fontSize: 12 }}><code>#{docPopup.info.usage}</code></pre>
-                <a href={docPopup.info.url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent, #a78bfa)', fontSize: 12 }}>Open Typst documentation ↗</a>
-              </>
-            )}
-          </div>
-        </>
-      )}
       {inputModal && <InputModal {...inputModal} onClose={() => setInputModal(null)} />}
       {codeRunner && <CodeRunnerModal {...codeRunner} onClose={() => setCodeRunner(null)} onInsert={(code) => { insertCode(code); setCodeRunner(null); }} onInsertEquation={(latex, codeBlock) => { insertEquationFromLatex(latex, codeBlock); setCodeRunner(null); }} onChanged={fetchTree} />}
       {showSaveAs && activeTab && <SaveAsModal onClose={() => setShowSaveAs(false)} fileName={activeTabPath} content={activeTab.content} pdfUrl={pdfUrl} projectName={projectName} mainFile={currentMain} />}

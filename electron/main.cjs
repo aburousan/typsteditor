@@ -75,6 +75,16 @@ function startServer() {
   // and Electron's utility process aborts with "Check failed: chdir(...) == 0"
   // when told to chdir into it — the backend then never starts (blank window on
   // Linux). server.js relies only on the env vars below, not the working dir.
+  // Optional bundled tinymist for hover/completion: if a copy is present in
+  // `bin/` (dev) or Resources/bin (packaged), use it; otherwise server.js falls
+  // back to `tinymist` on PATH. Not shipped by default to keep the app small —
+  // drop a binary in `bin/` and re-add the `extraResources` entry to bundle it.
+  const tinymistCandidates = [
+    path.join(process.resourcesPath || '', 'bin', 'tinymist'),
+    path.join(ROOT, 'bin', 'tinymist'),
+  ];
+  const bundledTinymist = tinymistCandidates.find(p => { try { return fs.existsSync(p); } catch { return false; } });
+
   serverProc = utilityProcess.fork(path.join(ROOT, 'server.js'), [], {
     stdio: 'inherit',
     env: {
@@ -83,6 +93,7 @@ function startServer() {
       PORT: String(PORT),
       TYPST_WORKSPACE: WORKSPACE,
       TYPST_DIST: path.join(ROOT, 'dist'),
+      ...(bundledTinymist ? { TINYMIST_BIN: bundledTinymist } : {}),
       ...(PKG_CACHE ? { TYPST_PACKAGE_CACHE_PATH: PKG_CACHE } : {}),
     },
   });

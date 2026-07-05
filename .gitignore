@@ -36,3 +36,4 @@ release/
 # files example.typ/showcase.typ/main.typ/refs.bib are tracked)
 workspace/*.pdf
 workspace/images/
+bin/tinymist

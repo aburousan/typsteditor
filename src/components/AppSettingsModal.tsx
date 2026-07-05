@@ -24,6 +24,8 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
   const [activeTab, setActiveTab] = useState<'general' | 'interpreters' | 'git' | 'cloud'>('general');
   const [tools, setTools] = useState<Tools | null>(null);
   const [picked, setPicked] = useState<Record<string, string>>({});
+  // Export resolution for inserted diagrams (flowchart etc.), in DPI.
+  const [exportDpi, setExportDpi] = useState<number>(() => Number(localStorage.getItem('fc_export_dpi')) || 200);
 
   useEffect(() => {
     if (activeTab !== 'interpreters' || tools) return;
@@ -75,7 +77,8 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
     }
   };
 
-  const inputStyle: React.CSSProperties = { padding: '8px', background: 'var(--bg-color)', color: 'var(--text-main)', border: '1px solid var(--border-color)', borderRadius: '4px' };
+  const inputStyle: React.CSSProperties = { padding: '9px 11px', background: 'var(--bg-color)', color: 'var(--text-main)', border: '1px solid var(--border-color)', borderRadius: '6px', fontSize: '0.9rem', fontFamily: 'inherit' };
+  const labelStyle: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', letterSpacing: '0.02em' };
   const btn = (bg: string): React.CSSProperties => ({ background: bg, color: 'white', border: 'none', padding: '8px 14px', borderRadius: '4px', cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1 });
 
   return (
@@ -100,19 +103,19 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
             <div>
               <h2 style={{ marginTop: 0 }}>General Settings</h2>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '20px' }}>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                  Editor Theme:
+                <label style={labelStyle}>
+                  Editor theme
                   <select style={inputStyle} value={theme} onChange={e => onTheme(e.target.value as 'typst-dark' | 'typst-light')}>
                     <option value="typst-dark">Dark Mode</option>
                     <option value="typst-light">Light Mode</option>
                   </select>
                 </label>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                  Editor Font Size:
+                <label style={labelStyle}>
+                  Editor font size
                   <input type="number" min={10} max={24} value={fontSize} onChange={e => onFontSize(Math.min(24, Math.max(10, Number(e.target.value) || 14)))} style={inputStyle} />
                 </label>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                  Auto-compile after typing stops:
+                <label style={labelStyle}>
+                  Auto-compile after typing stops
                   <select style={inputStyle} value={compileDelay} onChange={e => onCompileDelay(Number(e.target.value))}>
                     <option value={500}>0.5 s — fastest feedback</option>
                     <option value={1000}>1 s — default</option>
@@ -120,8 +123,14 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
                     <option value={4000}>4 s — huge documents / slow machines</option>
                   </select>
                 </label>
+                <label style={labelStyle}>
+                  Inserted diagram quality — <b style={{ color: 'var(--text-main)' }}>{exportDpi} DPI</b>
+                  <input type="range" min={96} max={500} step={8} value={exportDpi}
+                    onChange={e => { const v = Number(e.target.value); setExportDpi(v); localStorage.setItem('fc_export_dpi', String(v)); }} />
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Resolution of flowchart / diagram images added to the PDF. Higher = sharper but larger files (96 draft → 500 print).</span>
+                </label>
                 <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
-                  All three apply immediately and are remembered on this machine. ⌘S always compiles right away.
+                  All settings apply immediately and are remembered on this machine. ⌘S always compiles right away.
                 </p>
               </div>
             </div>
@@ -138,8 +147,8 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
               )}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '20px' }}>
                 {tools && Object.entries(tools.interpreters).map(([lang, list]) => (
-                  <label key={lang} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                    {lang === 'wolfram' ? 'Wolfram' : lang[0].toUpperCase() + lang.slice(1)}:
+                  <label key={lang} style={labelStyle}>
+                    {lang === 'wolfram' ? 'Wolfram' : lang[0].toUpperCase() + lang.slice(1)}
                     {list.length ? (
                       <select
                         value={picked[lang] || ''}
@@ -176,20 +185,20 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
                 <button style={btn('var(--accent)')} disabled={busy} onClick={() => call('/git/init')}>Initialize Repository</button>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '8px' }}>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                    Commit message:
+                  <label style={labelStyle}>
+                    Commit message
                     <div style={{ display: 'flex', gap: '8px' }}>
                       <input type="text" value={commitMsg} onChange={e => setCommitMsg(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
                       <button style={btn('#10b981')} disabled={busy} onClick={() => call('/git/commit', { message: commitMsg })}>Commit</button>
                     </div>
                   </label>
 
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                    Repository URL (HTTPS):
+                  <label style={labelStyle}>
+                    Repository URL (HTTPS)
                     <input type="text" placeholder="https://github.com/user/repo.git" value={githubUrl} onChange={e => setGithubUrl(e.target.value)} style={inputStyle} />
                   </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                    Personal Access Token (only used to push, never stored):
+                  <label style={labelStyle}>
+                    Personal access token (only used to push, never stored)
                     <input type="password" placeholder="ghp_..." value={githubToken} onChange={e => setGithubToken(e.target.value)} style={inputStyle} />
                   </label>
                   <div style={{ display: 'flex', gap: '8px' }}>
@@ -210,19 +219,19 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
                 Uploads to a <b>subfolder named after your project</b> (source + compiled PDFs). Credentials are stored only
                 in this browser (never in the repo or the app bundle).
               </p>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                WebDAV URL:
+              <label style={labelStyle}>
+                WebDAV URL
                 <input type="text" placeholder="https://cloud.example.com/remote.php/dav/files/you/Typst" defaultValue={localStorage.getItem('webdav_url') || ''}
                   onChange={e => localStorage.setItem('webdav_url', e.target.value.trim())} style={inputStyle} />
               </label>
               <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: '5px', flex: 1 }}>
-                  Username:
+                <label style={{ ...labelStyle, flex: 1 }}>
+                  Username
                   <input type="text" defaultValue={localStorage.getItem('webdav_user') || ''}
                     onChange={e => localStorage.setItem('webdav_user', e.target.value)} style={inputStyle} />
                 </label>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: '5px', flex: 1 }}>
-                  App password:
+                <label style={{ ...labelStyle, flex: 1 }}>
+                  App password
                   <input type="password" defaultValue={localStorage.getItem('webdav_pass') || ''}
                     onChange={e => localStorage.setItem('webdav_pass', e.target.value)} style={inputStyle} />
                 </label>
@@ -238,8 +247,8 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
                 Optional. Needs a one-time OAuth <b>Client ID</b> (Google Cloud Console → Credentials → OAuth client,
                 <i> Web application</i>, origin <code>http://localhost:5173</code>).
               </p>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginBottom: 18 }}>
-                Google OAuth Client ID:
+              <label style={{ ...labelStyle, marginBottom: 18 }}>
+                Google OAuth Client ID
                 <input type="text" placeholder="xxxxxxxx.apps.googleusercontent.com" defaultValue={localStorage.getItem('google_client_id') || ''}
                   onChange={e => localStorage.setItem('google_client_id', e.target.value.trim())} style={inputStyle} />
               </label>
@@ -248,8 +257,8 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
                 Alternatively, point this at your <b>Google Drive Desktop</b> folder (or any synced folder) — fully offline-friendly.
               </p>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '12px' }}>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                  Sync folder (absolute path):
+                <label style={labelStyle}>
+                  Sync folder (absolute path)
                   <input type="text" placeholder="/Users/you/Google Drive/My Drive/Typst" value={driveFolder} onChange={e => setDriveFolder(e.target.value)} style={inputStyle} />
                 </label>
                 <button style={{ ...btn('#ea4335'), alignSelf: 'flex-start' }} disabled={busy || !driveFolder} onClick={async () => {

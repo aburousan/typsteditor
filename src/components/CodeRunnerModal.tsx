@@ -8,6 +8,9 @@ type Tools = { execEnabled: boolean; interpreters: Record<Lang, Interp[]>; avail
 type RunResult = { ok: boolean; stdout: string; stderr: string; images: string[]; timedOut?: boolean; interpreter?: string };
 
 const LANG_FENCE: Record<Lang, string> = { python: 'python', julia: 'julia', wolfram: 'mathematica' };
+// File extension per language — runs are auto-saved into codes/<lang>/ so the
+// user keeps a record of every computation inside the project.
+const LANG_EXT: Record<Lang, string> = { python: 'py', julia: 'jl', wolfram: 'wls' };
 
 const TEMPLATES: Record<Lang, { label: string; code: string }[]> = {
   python: [
@@ -30,6 +33,46 @@ const TEMPLATES: Record<Lang, { label: string; code: string }[]> = {
     { label: 'Solve ODE (DSolve)', code: 'Print[DSolve[y\'\'[x] + w^2 y[x] == 0, y[x], x]]' },
     { label: 'Plot', code: 'Export["wolfram.png", Plot[Sin[x]/x, {x, -10, 10}, ImageSize -> 500]]\nPrint["saved wolfram.png"]' },
     { label: '3D plot', code: 'Export["wolfram3d.png", Plot3D[Sin[x] Cos[y], {x, -3, 3}, {y, -3, 3}, ImageSize -> 500]]\nPrint["saved wolfram3d.png"]' },
+    { label: 'GR: Schwarzschild curvature (xAct)', code: `(* Requires xAct installed. Curvature of the Schwarzschild metric via xCoba. *)
+Off[General::shdw];
+AppendTo[$Path, FileNameJoin[{$UserBaseDirectory, "Applications"}]];
+AppendTo[$Path, FileNameJoin[{$HomeDirectory, "Library", "Wolfram", "Applications"}]];
+Block[{Print}, Get["xAct\`xCoba\`"]]; xAct\`xCoba\`$CVVerbose = False;
+Block[{Print},
+  DefManifold[M, 4, {a, b, c, d, e, f}];
+  DefChart[ch, M, {0, 1, 2, 3}, {t[], r[], θ[], φ[]}];
+  DefMetric[-1, g[-a, -b], CD];
+  gS = {{-(1 - 2 m/r[]), 0, 0, 0}, {0, 1/(1 - 2 m/r[]), 0, 0}, {0, 0, r[]^2, 0}, {0, 0, 0, r[]^2 Sin[θ[]]^2}};
+  MetricInBasis[g, -ch, gS];
+  MetricCompute[g, ch, "Ricci"[-1, -1]];
+  MetricCompute[g, ch, "Riemann"[-1, -1, -1, -1]]];
+Print["Ricci tensor R_ab = ", Simplify[Table[RicciCD[{i, -ch}, {j, -ch}] // ToValues, {i, 0, 3}, {j, 0, 3}]], "  (=> vacuum solution)"];
+gi = Inverse[gS];
+Rd = Table[RiemannCD[{i, -ch}, {j, -ch}, {k, -ch}, {l, -ch}] // ToValues, {i, 0, 3}, {j, 0, 3}, {k, 0, 3}, {l, 0, 3}];
+raise[Tn_] := Transpose[gi . Tn, RotateRight[Range[ArrayDepth[Tn]]]];
+K = Simplify[Total[Rd Nest[raise, Rd, 4], 4]];
+Print["Kretschmann K = R_abcd R^abcd = ", K /. r[] -> r];
+Print["LaTeX (wrap in $...$ or use mitex): ", ToString[TeXForm[K /. r[] -> r]]];` },
+    { label: 'GR: Penrose diagram (Minkowski)', code: `(* Conformal (Penrose) diagram of Minkowski spacetime -> saves penrose.png *)
+pp[t_, r_] := ArcTan[t + r]; qq[t_, r_] := ArcTan[t - r];
+tt[t_, r_] := pp[t, r] + qq[t, r]; xx[t_, r_] := pp[t, r] - qq[t, r];
+cR = Table[ParametricPlot[{xx[t, r], tt[t, r]}, {t, -200, 200}, PlotStyle -> {Blue, Thin}], {r, {0.3, 1, 2, 5, 20}}];
+cT = Table[ParametricPlot[{xx[t, r], tt[t, r]}, {r, 0, 200}, PlotStyle -> {Red, Thin}], {t, {-5, -2, -0.01, 2, 5}}];
+bnd = Graphics[{Thick, Line[{{0, -Pi}, {Pi, 0}}], Line[{{Pi, 0}, {0, Pi}}], Line[{{0, -Pi}, {0, Pi}}],
+  Text[Style[Superscript["i", "+"], 14], {0, Pi}, {0, -1.4}], Text[Style[Superscript["i", "-"], 14], {0, -Pi}, {0, 1.4}], Text[Style[Superscript["i", "0"], 14], {Pi, 0}, {-1.4, 0}],
+  Text[Style[Superscript["\\[ScriptCapitalI]", "+"], 14], {Pi/2 + 0.2, Pi/2 + 0.13}], Text[Style[Superscript["\\[ScriptCapitalI]", "-"], 14], {Pi/2 + 0.2, -Pi/2 - 0.13}]}];
+Export["penrose.png", Show[cR, cT, bnd, PlotRange -> {{-0.2, Pi + 0.4}, {-Pi - 0.4, Pi + 0.4}}, Axes -> False, ImageSize -> 520, PlotLabel -> Style["Penrose diagram: Minkowski", 14]]];
+Print["saved penrose.png  (blue = worldlines r=const, red = slices t=const)"];` },
+    { label: 'Clebsch–Gordan table (image)', code: `(* CG coefficients for j1=1 ⊗ j2=1, as a colored change-of-basis matrix -> cg.png *)
+j1 = 1; j2 = 1;
+ms = Flatten[Table[{m1, m2}, {m1, j1, -j1, -1}, {m2, j2, -j2, -1}], 1];
+js = Flatten[Table[{j, m}, {j, j1 + j2, Abs[j1 - j2], -1}, {m, j, -j, -1}], 1];
+mat = Quiet[Table[ClebschGordan[{j1, mm[[1]]}, {j2, mm[[2]]}, jm], {jm, js}, {mm, ms}], ClebschGordan::phy];
+ket[s_] := "|" <> ToString[s[[1]]] <> "," <> ToString[s[[2]]] <> "\\[RightAngleBracket]";
+Quiet[Export["cg.png", MatrixPlot[N[mat], ColorFunction -> "TemperatureMap", PlotLegends -> Automatic,
+  FrameTicks -> {{Transpose[{Range[Length[js]], ket /@ js}], None}, {None, Transpose[{Range[Length[ms]], ket /@ ms}]}},
+  PlotLabel -> Style["Clebsch-Gordan  1\\[CircleTimes]1", 14], ImageSize -> 560]], FrontEndObject::notavail];
+Print["saved cg.png  (rows |j,m>, columns |m1,m2>)"];` },
   ],
 };
 
@@ -47,6 +90,8 @@ const EQ_TEMPLATES: Record<Lang, { label: string; code: string }[]> = {
     { label: 'Derivative', code: 'D[Sin[x^2], x]' },
     { label: 'Integral', code: 'Integrate[1/(1 + x^2), x]' },
     { label: 'Solve', code: 'Solve[a x^2 + b x + c == 0, x]' },
+    { label: 'Clebsch–Gordan coefficient', code: 'ClebschGordan[{1, 1}, {1, -1}, {2, 0}]' },
+    { label: 'Wigner 3-j symbol', code: 'ThreeJSymbol[{1, 1}, {1, -1}, {2, 0}]' },
   ],
 };
 
@@ -57,6 +102,10 @@ export default function CodeRunnerModal({ onClose, onInsert, onInsertEquation, o
   const [outputMode, setOutputMode] = useState<'text' | 'equation'>(initialMode ?? 'text');
   const [code, setCode] = useState(initialCode ?? TEMPLATES[initialLang ?? 'python'][0].code);
   const [includeCode, setIncludeCode] = useState(true);
+  // A stable name for this runner session so re-runs update one file instead of
+  // spawning a new one each time.
+  const [snippetName] = useState(() => 'snippet-' + Date.now().toString(36));
+  const [savedPath, setSavedPath] = useState<string | null>(null);
   const templatesFor = (l: Lang, mode: 'text' | 'equation') => (mode === 'equation' ? EQ_TEMPLATES : TEMPLATES)[l];
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<RunResult | null>(null);
@@ -88,6 +137,13 @@ export default function CodeRunnerModal({ onClose, onInsert, onInsertEquation, o
 
   const run = async () => {
     setRunning(true); setResult(null);
+    // Keep every run: persist the current snippet into codes/<lang>/ before it runs.
+    const path = `codes/${lang}/${snippetName}.${LANG_EXT[lang]}`;
+    try {
+      await fetch(`${API}/workspace/file?path=${encodeURIComponent(path)}`, { method: 'POST', body: code, headers: { 'Content-Type': 'text/plain' } });
+      setSavedPath(path);
+      onChanged?.();
+    } catch { /* saving is best-effort; a run should still proceed offline */ }
     try {
       const res = await fetch(`${API}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lang, code, bin, outputMode }) });
       const data = await res.json();
@@ -184,6 +240,7 @@ export default function CodeRunnerModal({ onClose, onInsert, onInsertEquation, o
           <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
             <button className="btn-primary" onClick={run} disabled={running || (tools ? !tools.execEnabled : false)}>{running ? 'Running…' : `▶ Run`}</button>
             <label className="form-check"><input type="checkbox" checked={includeCode} onChange={e => setIncludeCode(e.target.checked)} /> Include source code in document</label>
+            {savedPath && <span className="form-hint" style={{ margin: 0, opacity: 0.7 }} title="Every run is kept in the project">💾 saved to <code>{savedPath}</code></span>}
           </div>
 
           {result && (

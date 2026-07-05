@@ -25,6 +25,13 @@ let WORKSPACE_DIR = process.env.TYPST_WORKSPACE || join(process.cwd(), 'workspac
 if (!existsSync(WORKSPACE_DIR)) {
   mkdirSync(WORKSPACE_DIR, { recursive: true });
 }
+
+// Resolve the tinymist LSP binary. The desktop shell sets TINYMIST_BIN to the
+// copy it bundles; otherwise fall back to `tinymist` on PATH. Bundling means
+// hover/completion work out of the box without the user installing tinymist.
+const TINYMIST_BIN = (process.env.TINYMIST_BIN && existsSync(process.env.TINYMIST_BIN))
+  ? process.env.TINYMIST_BIN
+  : 'tinymist';
 const DIST_DIR = process.env.TYPST_DIST || join(process.cwd(), 'dist');
 
 // Derived scratch locations — computed from the *current* workspace each call so
@@ -179,7 +186,10 @@ app.post('/compile', (req, res) => {
     try { writeFileSync(mainPath, req.body); } catch(e) {}
   }
   
-  const typstProcess = spawn('typst', ['compile', mainPath, outputPath], { cwd: WORKSPACE_DIR });
+  // Make any fonts the user imported into <workspace>/fonts discoverable by the
+  // compiler so `#set text(font: "…")` works with custom .ttf/.otf files.
+  const fontArgs = existsSync(join(WORKSPACE_DIR, 'fonts')) ? ['--font-path', 'fonts'] : [];
+  const typstProcess = spawn('typst', ['compile', ...fontArgs, mainPath, outputPath], { cwd: WORKSPACE_DIR });
   let stderr = '';
   let responded = false;
   typstProcess.stderr.on('data', data => { stderr += data.toString(); });
@@ -900,6 +910,182 @@ app.post('/packages/remove', (req, res) => {
     try { if (readdirSync(nameDir).length === 0) rmSync(nameDir, { recursive: true, force: true }); } catch {}
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ─── Tinymist LSP proxy for hover/docs ─────────────────────────────────────
+// Instead of piping the full LSP protocol to the browser (which requires
+// monaco-languageclient, WebSockets, and careful version alignment), we keep
+// a single long-lived tinymist process on the backend and expose a trivial
+// REST endpoint that the frontend's Monaco hover provider can call.
+
+let lspProcess = null;
+let lspBuffer = Buffer.alloc(0);
+let lspReqId = 0;
+let lspPendingCallbacks = {};   // id → { resolve, timer }
+let lspOpenedFiles = {};        // uri → version
+let lspFileHashes = {};         // uri → hash of last-synced content
+let lspInitialized = false;
+
+// Cheap string hash (FNV-1a) so repeated hovers on an unchanged document don't
+// re-send the whole text and force tinymist to re-parse it every time.
+function lspHash(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(16) + ':' + s.length;
+}
+let lspInitPromise = null;
+
+function ensureLsp() {
+  if (lspProcess && !lspProcess.killed) return lspInitPromise;
+  lspInitialized = false;
+  lspOpenedFiles = {};
+  lspFileHashes = {};
+  lspBuffer = Buffer.alloc(0);
+
+  lspProcess = spawn(TINYMIST_BIN, ['lsp'], { cwd: WORKSPACE_DIR });
+  lspProcess.stderr.on('data', (d) => { /* tinymist logs — silent */ });
+  lspProcess.on('error', (err) => console.error('[tinymist] spawn error:', err.message));
+  lspProcess.on('close', () => { lspProcess = null; lspInitialized = false; lspInitPromise = null; });
+
+  // Parse LSP stdout (Content-Length framed JSON-RPC)
+  lspProcess.stdout.on('data', (chunk) => {
+    lspBuffer = Buffer.concat([lspBuffer, chunk]);
+    while (true) {
+      const headerEnd = lspBuffer.indexOf('\r\n\r\n');
+      if (headerEnd < 0) break;
+      const header = lspBuffer.slice(0, headerEnd).toString('utf8');
+      const match = header.match(/Content-Length:\s*(\d+)/i);
+      if (!match) { lspBuffer = lspBuffer.slice(headerEnd + 4); continue; }
+      const len = parseInt(match[1], 10);
+      const totalLen = headerEnd + 4 + len;
+      if (lspBuffer.length < totalLen) break;
+      const body = lspBuffer.slice(headerEnd + 4, totalLen).toString('utf8');
+      lspBuffer = lspBuffer.slice(totalLen);
+      try {
+        const msg = JSON.parse(body);
+        if (msg.id !== undefined && lspPendingCallbacks[msg.id]) {
+          const cb = lspPendingCallbacks[msg.id];
+          delete lspPendingCallbacks[msg.id];
+          clearTimeout(cb.timer);
+          cb.resolve(msg);
+        }
+      } catch {}
+    }
+  });
+
+  lspInitPromise = new Promise((resolve) => {
+    const id = ++lspReqId;
+    lspSendRaw({ jsonrpc: '2.0', id, method: 'initialize', params: {
+      processId: process.pid,
+      capabilities: {},
+      rootUri: 'file://' + WORKSPACE_DIR,
+      workspaceFolders: [{ uri: 'file://' + WORKSPACE_DIR, name: 'workspace' }],
+    }});
+    lspPendingCallbacks[id] = {
+      resolve: (msg) => {
+        // Send initialized notification
+        lspSendRaw({ jsonrpc: '2.0', method: 'initialized', params: {} });
+        lspInitialized = true;
+        resolve();
+      },
+      timer: setTimeout(() => { delete lspPendingCallbacks[id]; resolve(); }, 5000),
+    };
+  });
+  return lspInitPromise;
+}
+
+function lspSendRaw(obj) {
+  if (!lspProcess || lspProcess.killed) return;
+  const json = JSON.stringify(obj);
+  const header = `Content-Length: ${Buffer.byteLength(json, 'utf8')}\r\n\r\n`;
+  lspProcess.stdin.write(header + json);
+}
+
+function lspRequest(method, params, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const id = ++lspReqId;
+    lspSendRaw({ jsonrpc: '2.0', id, method, params });
+    const timer = setTimeout(() => { delete lspPendingCallbacks[id]; resolve(null); }, timeoutMs);
+    lspPendingCallbacks[id] = { resolve: (msg) => resolve(msg.result), timer };
+  });
+}
+
+function lspSyncFile(filePath, content) {
+  const uri = 'file://' + filePath;
+  const hash = lspHash(content);
+  if (!lspOpenedFiles[uri]) {
+    lspOpenedFiles[uri] = 1;
+    lspFileHashes[uri] = hash;
+    lspSendRaw({ jsonrpc: '2.0', method: 'textDocument/didOpen', params: {
+      textDocument: { uri, languageId: 'typst', version: 1, text: content },
+    }});
+  } else if (lspFileHashes[uri] !== hash) {
+    // Only push a didChange when the text actually differs from last time.
+    lspOpenedFiles[uri]++;
+    lspFileHashes[uri] = hash;
+    lspSendRaw({ jsonrpc: '2.0', method: 'textDocument/didChange', params: {
+      textDocument: { uri, version: lspOpenedFiles[uri] },
+      contentChanges: [{ text: content }],
+    }});
+  }
+}
+
+// POST /lsp/hover  { file: "main.typ", line: 0, character: 5, content: "..." }
+// Returns { contents: "markdown string" } or { contents: null }
+app.post('/lsp/hover', async (req, res) => {
+  try {
+    const { file, line, character, content } = req.body;
+    if (typeof file !== 'string' || typeof line !== 'number' || typeof character !== 'number') {
+      return res.json({ contents: null });
+    }
+    await ensureLsp();
+    const absPath = resolve(WORKSPACE_DIR, file);
+    // Sync file content so tinymist has the latest text
+    lspSyncFile(absPath, content || '');
+    const result = await lspRequest('textDocument/hover', {
+      textDocument: { uri: 'file://' + absPath },
+      position: { line, character },
+    });
+    if (!result || !result.contents) return res.json({ contents: null });
+    // Normalise: tinymist may return a string or { kind, value }
+    let md = typeof result.contents === 'string'
+      ? result.contents
+      : (result.contents.value || String(result.contents));
+    // Strip out VSCode-specific command links (like [Open in Tab](command:tinymist...))
+    md = md.replace(/\[.*?\]\(command:[^)]+\)(?:\s*\|\s*)?/g, '').trim();
+    md = md.replace(/\n+---\n*$/, '').trim();
+    return res.json({ contents: md, range: result.range || null });
+  } catch (e) {
+    return res.json({ contents: null });
+  }
+});
+
+// POST /lsp/completion { file: "main.typ", line: 0, character: 5, content: "..." }
+// Returns { items: [...] }
+app.post('/lsp/completion', async (req, res) => {
+  try {
+    const { file, line, character, content } = req.body;
+    if (typeof file !== 'string' || typeof line !== 'number' || typeof character !== 'number') {
+      return res.json({ items: [] });
+    }
+    await ensureLsp();
+    const absPath = resolve(WORKSPACE_DIR, file);
+    lspSyncFile(absPath, content || '');
+    
+    // Add a tiny bit of context so completion knows we're triggering it explicitly if needed
+    const result = await lspRequest('textDocument/completion', {
+      textDocument: { uri: 'file://' + absPath },
+      position: { line, character },
+      context: { triggerKind: 1 } // Invoked
+    });
+    
+    if (!result) return res.json({ items: [] });
+    // tinymist can return an array or { isIncomplete: boolean, items: [...] }
+    const items = Array.isArray(result) ? result : (result.items || []);
+    return res.json({ items });
+  } catch (e) {
+    return res.json({ items: [] });
+  }
 });
 
 // The desktop app passes PORT so it can pick a free one when 3001 is taken
