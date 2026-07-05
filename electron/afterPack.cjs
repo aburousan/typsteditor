@@ -1,7 +1,7 @@
 // Ad-hoc code-sign the packaged macOS app so Apple Silicon will run it.
 // Without any signature, unsigned apps are reported as "damaged" on arm64 Macs.
 // (This is NOT notarization — users still bypass Gatekeeper once: right-click → Open,
-//  or run:  xattr -cr "/Applications/Typst Editor.app")
+//  or run:  xattr -cr "/Applications/Hilbert.app")
 const { execSync } = require('child_process');
 
 exports.default = async function afterPack(context) {

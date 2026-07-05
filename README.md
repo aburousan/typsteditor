@@ -1,4 +1,9 @@
-# Typst Editor
+# Hilbert — an offline editor for Typst
+
+> **Unofficial.** Hilbert is an independent, community-built editor. It is not
+> the Typst web app, IDE, or compiler, and is not affiliated with or endorsed by
+> the Typst team. "Typst" is a trademark of its respective owners; this project
+> merely builds on top of the open-source Typst compiler.
 
 I wanted an offline, Overleaf-feeling place to write physics and maths in
 [Typst](https://typst.app) — a real code editor on the left, a live PDF on the
@@ -7,7 +12,7 @@ one click away instead of memorised. So I built one. It runs entirely on your
 machine, and it can even run your Python / Julia / Wolfram snippets and drop the
 result straight into the document.
 
-![Typst Editor](docs/screenshot.png)
+![Hilbert](docs/screenshot.png)
 
 ## Demo
 
@@ -177,8 +182,8 @@ view:
 ## Get it running
 
 ```bash
-git clone https://github.com/aburousan/typsteditor.git
-cd typsteditor
+git clone https://github.com/aburousan/hilbert-editor.git
+cd hilbert-editor
 bash scripts/setup.sh   # installs Typst + Python deps and runs npm install (macOS/Linux)
 npm run dev
 ```
@@ -190,7 +195,7 @@ starts the Vite dev server and the local backend; open the printed URL (default
 
 ### Prefer a desktop app?
 
-There are prebuilt installers on the [Releases](https://github.com/aburousan/typsteditor/releases)
+There are prebuilt installers on the [Releases](https://github.com/aburousan/hilbert-editor/releases)
 page — a **`.dmg`** for macOS (Apple Silicon and Intel) and an **`.AppImage`**
 for Linux — or build them yourself:
 
@@ -199,7 +204,7 @@ npm run app     # build the UI and launch the desktop window
 npm run dist    # build installers into release/ (.dmg on macOS, .AppImage on Linux)
 ```
 
-Your documents live in `~/Documents/TypstEditor`. The desktop app still needs the
+Your documents live in `~/Documents/Hilbert`. The desktop app still needs the
 **Typst CLI** on your `PATH` (and Python/Julia/Wolfram for the optional code
 features) — those aren't bundled.
 
@@ -209,9 +214,9 @@ features) — those aren't bundled.
 > build it yourself. To open:
 > - **macOS 15 (Sequoia) and newer:** double-click once (it will refuse), then
 >   go to **System Settings → Privacy & Security**, scroll down, and click
->   **Open Anyway** next to Typst Editor.
+>   **Open Anyway** next to Hilbert.
 > - **macOS 14 and older:** right-click the app → **Open** → **Open**.
-> - **Terminal alternative** (any version): `xattr -cr "/Applications/Typst Editor.app"`
+> - **Terminal alternative** (any version): `xattr -cr "/Applications/Hilbert.app"`
 >   removes the quarantine flag, then it opens normally.
 >
 > This only happens once; afterwards the app opens like any other.
@@ -224,8 +229,8 @@ Windows isn't in the prebuilt releases yet, but it runs fine — two ways:
 
 ```powershell
 winget install Typst.Typst        # or: scoop install typst / choco install typst
-git clone https://github.com/aburousan/typsteditor.git
-cd typsteditor
+git clone https://github.com/aburousan/hilbert-editor.git
+cd hilbert-editor
 npm install
 npm run dev                        # then open http://localhost:5173
 ```
@@ -268,7 +273,7 @@ documents persist in the mounted `workspace/`. Keep the port on `127.0.0.1` only
 
 - **macOS says the app is "damaged" or won't open** — it's ad-hoc signed but not
   notarised. Right-click the app → **Open** (once), or run
-  `xattr -cr "/Applications/Typst Editor.app"`.
+  `xattr -cr "/Applications/Hilbert.app"`.
 - **Window is blank / "couldn't start its local engine"** — something else is
   using port 3001. Quit it and reopen.
 - **It opens but nothing compiles** — the **Typst CLI** isn't installed or isn't
@@ -311,7 +316,7 @@ to. For Google Drive you supply your own OAuth Client ID in App Settings.
 
 A lot of the recent UI changes came from suggestions by friends who use the
 editor day to day. Thank you. If you want a feature or have an idea, open a
-[Discussion](https://github.com/aburousan/typsteditor/discussions); I read them
+[Discussion](https://github.com/aburousan/hilbert-editor/discussions); I read them
 and pick up what makes sense. I try to ship an update every couple of months,
 sooner if a serious bug turns up.
 

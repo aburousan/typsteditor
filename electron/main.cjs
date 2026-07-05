@@ -21,7 +21,14 @@ function augmentedPath() {
   return [...extra, process.env.PATH || ''].join(path.delimiter);
 }
 // Keep user documents in a writable location outside the app bundle.
-const WORKSPACE = path.join(app.getPath('documents'), 'TypstEditor');
+// The app was formerly "Typst Editor" and stored docs in Documents/TypstEditor;
+// migrate that folder to the new Documents/Hilbert on first launch so existing
+// users don't appear to "lose" their files after the rename.
+const WORKSPACE = path.join(app.getPath('documents'), 'Hilbert');
+const LEGACY_WORKSPACE = path.join(app.getPath('documents'), 'TypstEditor');
+if (!fs.existsSync(WORKSPACE) && fs.existsSync(LEGACY_WORKSPACE)) {
+  try { fs.renameSync(LEGACY_WORKSPACE, WORKSPACE); } catch { /* keep legacy dir; created fresh below */ }
+}
 fs.mkdirSync(WORKSPACE, { recursive: true });
 
 let serverProc = null;
@@ -111,7 +118,7 @@ function waitForServer(cb, tries = 0) {
 function createWindow(err) {
   const win = new BrowserWindow({
     width: 1440, height: 920, minWidth: 900, minHeight: 600,
-    title: 'Typst Editor',
+    title: 'Hilbert',
     backgroundColor: '#0f172a',
     webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'preload.cjs') },
   });
@@ -119,9 +126,9 @@ function createWindow(err) {
     // Backend never came up — show a readable message rather than a blank window.
     win.loadURL('data:text/html,' + encodeURIComponent(
       `<body style="font:16px system-ui;background:#0f172a;color:#e2e8f0;padding:3rem;line-height:1.6">
-       <h2>Typst Editor couldn't start its local engine.</h2>
+       <h2>Hilbert couldn't start its local engine.</h2>
        <p>The built-in server didn't respond. Reopen the app; if it persists, please
-       report it at <a style="color:#a78bfa" href="https://github.com/aburousan/typsteditor/issues">github.com/aburousan/typsteditor/issues</a>.</p>
+       report it at <a style="color:#a78bfa" href="https://github.com/aburousan/hilbert-editor/issues">github.com/aburousan/hilbert-editor/issues</a>.</p>
        </body>`));
     return;
   }

@@ -43,7 +43,7 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
   const [driveFolder, setDriveFolder] = useState('');
 
   const [git, setGit] = useState<GitStatus | null>(null);
-  const [commitMsg, setCommitMsg] = useState('Update from Typst Editor');
+  const [commitMsg, setCommitMsg] = useState('Update from Hilbert');
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string>('');
 

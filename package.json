@@ -1,19 +1,19 @@
 {
-  "name": "typst-editor",
+  "name": "hilbert-editor",
   "private": true,
   "version": "0.1.2",
-  "description": "A local, offline editor for Typst aimed at maths/physics writing.",
+  "description": "Hilbert — an offline editor for Typst (Unofficial), aimed at maths/physics writing.",
   "author": "Kazi Abu Rousan",
   "license": "MIT",
   "type": "module",
   "main": "electron/main.cjs",
-  "homepage": "https://github.com/aburousan/typsteditor",
+  "homepage": "https://github.com/aburousan/hilbert-editor",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aburousan/typsteditor.git"
+    "url": "https://github.com/aburousan/hilbert-editor.git"
   },
   "bugs": {
-    "url": "https://github.com/aburousan/typsteditor/issues"
+    "url": "https://github.com/aburousan/hilbert-editor/issues"
   },
   "scripts": {
     "dev": "concurrently \"node server.js\" \"vite\"",
@@ -25,8 +25,8 @@
     "dist": "npm run build && electron-builder"
   },
   "build": {
-    "appId": "com.kaziaburousan.typsteditor",
-    "productName": "Typst Editor",
+    "appId": "com.kaziaburousan.hilbert",
+    "productName": "Hilbert",
     "directories": {
       "output": "release"
     },

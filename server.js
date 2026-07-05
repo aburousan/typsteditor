@@ -1,9 +1,21 @@
 import express from 'express';
 import cors from 'cors';
-import { spawn, execFile, execFileSync } from 'child_process';
+import { spawn as _spawn, execFile as _execFile, execFileSync as _execFileSync } from 'child_process';
 import { writeFileSync, readFileSync, rmSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, cpSync, mkdtempSync } from 'fs';
-import { join, relative, dirname, resolve, sep } from 'path';
+import { join, relative, dirname, resolve, sep, delimiter } from 'path';
 import { tmpdir, homedir } from 'os';
+
+// On Windows, launching a console program (typst, git, python, julia, tinymist…)
+// from a GUI app pops up a black cmd window for every call. `windowsHide: true`
+// suppresses it. These thin wrappers inject the flag so every call site below
+// gets it for free; no effect on macOS/Linux.
+const IS_WIN = process.platform === 'win32';
+function spawn(cmd, args, opts = {}) { return _spawn(cmd, args, { windowsHide: true, ...opts }); }
+function execFile(cmd, args, opts, cb) {
+  if (typeof opts === 'function') { cb = opts; opts = {}; }
+  return _execFile(cmd, args, { windowsHide: true, ...opts }, cb);
+}
+function execFileSync(cmd, args, opts = {}) { return _execFileSync(cmd, args, { windowsHide: true, ...opts }); }
 
 // Safety net: never let a stray async error (e.g. an unhandled child-process
 // spawn failure) take down the whole backend — that would leave the UI stuck on
@@ -560,39 +572,76 @@ const ALLOW_EXEC = process.env.ALLOW_CODE_EXECUTION !== '0';
 const IMAGE_EXT = ['.png', '.jpg', '.jpeg', '.svg', '.gif'];
 const EXEC_TIMEOUT_MS = Number(process.env.EXEC_TIMEOUT_MS || 45000);
 
+// Cross-platform `which`: walk PATH ourselves rather than shelling out to the
+// `which`/`where` binary (which doesn't exist / differs across OSes). On Windows
+// we try each PATHEXT extension so `which('python')` matches `python.exe`.
 function which(name) {
-  try { return execFileSync('/usr/bin/which', [name], { encoding: 'utf-8' }).trim() || null; }
-  catch { return null; }
+  const exts = IS_WIN ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';') : [''];
+  for (const dir of (process.env.PATH || '').split(delimiter).filter(Boolean)) {
+    for (const ext of exts) {
+      const p = join(dir, name + ext);
+      try { if (existsSync(p)) return p; } catch { /* unreadable dir */ }
+    }
+  }
+  return null;
+}
+
+// A conda/venv env stores its interpreter at bin/python (Unix) or python.exe
+// (Windows). Return whichever exists under `dir`, else null.
+function pyIn(dir) {
+  const p = IS_WIN ? join(dir, 'python.exe') : join(dir, 'bin', 'python');
+  return existsSync(p) ? p : null;
 }
 
 // Discover every interpreter we can offer, so the UI can let users pick an
 // environment (e.g. a specific conda env) without editing config files.
 function detectInterpreters() {
-  const home = process.env.HOME || '';
+  const home = homedir();
   const out = { python: [], julia: [], wolfram: [] };
 
-  const basePy = which('python3') || which('python') || [`${home}/miniconda3/bin/python3`, '/opt/homebrew/bin/python3', '/usr/bin/python3'].find(existsSync);
-  if (basePy) out.python.push({ label: 'Default (python3)', path: basePy });
-  for (const root of ['miniconda3', 'anaconda3', 'mambaforge', 'miniforge3']) {
-    const envsDir = join(home, root, 'envs');
+  // Windows Python is usually `python.exe` (never python3) and often only
+  // reachable via the `py` launcher; Unix prefers python3. Try PATH first, then
+  // common install locations for each platform.
+  const winFallback = IS_WIN ? [
+    join(home, 'AppData', 'Local', 'Programs', 'Python'),
+    'C:\\Python313', 'C:\\Python312', 'C:\\Python311', 'C:\\Python310',
+  ] : [];
+  const unixFallback = IS_WIN ? [] : [`${home}/miniconda3/bin/python3`, '/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3'];
+  const basePy = which('python3') || which('python') || (IS_WIN ? which('py') : null)
+    || unixFallback.find(existsSync)
+    // Windows: scan the per-user Python install dir for pythonXY\python.exe.
+    || winFallback.map(d => { try { return existsSync(d) && !d.endsWith('.exe') ? readdirSync(d).map(v => join(d, v, 'python.exe')).find(existsSync) : (existsSync(join(d, 'python.exe')) ? join(d, 'python.exe') : null); } catch { return null; } }).find(Boolean)
+    || null;
+  if (basePy) out.python.push({ label: 'Default (python)', path: basePy });
+
+  // conda / mamba environments — roots differ by platform.
+  const condaRoots = IS_WIN
+    ? ['miniconda3', 'anaconda3', 'mambaforge', 'miniforge3'].flatMap(r => [join(home, r), join('C:\\', r), join('C:\\ProgramData', r)])
+    : ['miniconda3', 'anaconda3', 'mambaforge', 'miniforge3'].map(r => join(home, r));
+  for (const root of condaRoots) {
+    const envsDir = join(root, 'envs');
     if (existsSync(envsDir)) {
       for (const env of readdirSync(envsDir)) {
-        const p = join(envsDir, env, 'bin', 'python');
-        if (existsSync(p)) out.python.push({ label: `conda: ${env}`, path: p });
+        const p = pyIn(join(envsDir, env));
+        if (p) out.python.push({ label: `conda: ${env}`, path: p });
       }
     }
   }
-  // pyenv / venvs
+  // pyenv / virtualenvwrapper envs (mostly Unix).
   const venvDir = join(home, '.virtualenvs');
   if (existsSync(venvDir)) for (const env of readdirSync(venvDir)) {
-    const p = join(venvDir, env, 'bin', 'python');
-    if (existsSync(p)) out.python.push({ label: `venv: ${env}`, path: p });
+    const p = pyIn(join(venvDir, env));
+    if (p) out.python.push({ label: `venv: ${env}`, path: p });
   }
 
-  const jl = which('julia') || [`${home}/.juliaup/bin/julia`, '/opt/homebrew/bin/julia', '/usr/local/bin/julia'].find(existsSync);
+  const jl = which('julia')
+    || (IS_WIN ? [join(home, '.juliaup', 'bin', 'julia.exe'), join(home, 'AppData', 'Local', 'Programs', 'Julia', 'bin', 'julia.exe')]
+                : [`${home}/.juliaup/bin/julia`, '/opt/homebrew/bin/julia', '/usr/local/bin/julia']).find(existsSync);
   if (jl) out.julia.push({ label: 'Default (julia)', path: jl });
 
-  const wl = which('wolframscript') || ['/usr/local/bin/wolframscript', '/opt/homebrew/bin/wolframscript'].find(existsSync);
+  const wl = which('wolframscript')
+    || (IS_WIN ? ['C:\\Program Files\\Wolfram Research\\WolframScript\\wolframscript.exe']
+                : ['/usr/local/bin/wolframscript', '/opt/homebrew/bin/wolframscript']).find(existsSync);
   if (wl) out.wolfram.push({ label: 'WolframScript', path: wl });
 
   return out;
