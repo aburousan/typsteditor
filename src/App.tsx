@@ -690,23 +690,35 @@ export default function App() {
     });
   };
 
-  const createNewFile = async (basePath?: string | React.MouseEvent) => {
+  const createNewFile = (basePath?: string | React.MouseEvent) => {
     const dir = typeof basePath === 'string' ? basePath : undefined;
-    const defaultName = dir ? `${dir}/new.typ` : 'new.typ';
-    const name = prompt('File name (use a slash for a subfolder, e.g. chapters/intro.typ):', defaultName);
-    if (!name) return;
-    await fetch(`${API}/workspace/file?path=${encodeURIComponent(name)}`, { method: 'POST', body: '' });
-    fetchTree();
-    openFile(name);
+    setInputModal({
+      title: 'New File',
+      submitLabel: 'Create',
+      fields: [{ key: 'name', label: 'File name', default: dir ? `${dir}/` : '', placeholder: 'chapters/intro.typ', hint: 'Use a slash for a subfolder, e.g. chapters/intro.typ' }],
+      onSubmit: async (v) => {
+        const name = (v.name || '').trim();
+        if (!name || name.endsWith('/')) return;
+        await fetch(`${API}/workspace/file?path=${encodeURIComponent(name)}`, { method: 'POST', body: '' });
+        fetchTree();
+        openFile(name);
+      },
+    });
   };
 
-  const createNewFolder = async (basePath?: string | React.MouseEvent) => {
+  const createNewFolder = (basePath?: string | React.MouseEvent) => {
     const dir = typeof basePath === 'string' ? basePath : undefined;
-    const defaultName = dir ? `${dir}/new_folder` : 'images';
-    const name = prompt('Folder name (e.g. images):', defaultName);
-    if (!name) return;
-    await fetch(`${API}/workspace/mkdir?path=${encodeURIComponent(name)}`, { method: 'POST' });
-    fetchTree();
+    setInputModal({
+      title: 'New Folder',
+      submitLabel: 'Create',
+      fields: [{ key: 'name', label: 'Folder name', default: dir ? `${dir}/` : '', placeholder: 'images', hint: 'Use a slash for nested folders, e.g. assets/figures' }],
+      onSubmit: async (v) => {
+        const name = (v.name || '').trim().replace(/\/+$/, '');
+        if (!name) return;
+        await fetch(`${API}/workspace/mkdir?path=${encodeURIComponent(name)}`, { method: 'POST' });
+        fetchTree();
+      },
+    });
   };
 
   const handleNodeClick = (e: React.MouseEvent, path: string, isDir: boolean) => {
@@ -875,24 +887,29 @@ export default function App() {
       setRenamingPath(p);
       setRenameValue(p.split('/').pop() || '');
     } else {
-      const pattern = prompt(`Rename ${paths.length} items to (e.g. file_#):`, 'file_#');
-      if (!pattern) return;
-      (async () => {
-        let i = 1;
-        for (const p of paths) {
-          const parent = p.includes('/') ? p.substring(0, p.lastIndexOf('/')) : '';
-          const originalName = p.split('/').pop() || '';
-          const match = originalName.match(/(\.[^.]+)$/);
-          const ext = match ? match[1] : '';
-          let newName = pattern.replace('#', String(i++));
-          if (ext && !newName.endsWith(ext)) newName += ext;
-          const newPath = parent ? `${parent}/${newName}` : newName;
-          await fetch(`${API}/workspace/rename`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: p, to: newPath })
-          });
-        }
-        fetchTree();
-      })();
+      setInputModal({
+        title: `Rename ${paths.length} items`,
+        submitLabel: 'Rename',
+        fields: [{ key: 'pattern', label: 'Name pattern', default: 'file_#', hint: '# is replaced by a number (1, 2, 3, …); the extension is kept' }],
+        onSubmit: async (v) => {
+          const pattern = (v.pattern || '').trim();
+          if (!pattern) return;
+          let i = 1;
+          for (const p of paths) {
+            const parent = p.includes('/') ? p.substring(0, p.lastIndexOf('/')) : '';
+            const originalName = p.split('/').pop() || '';
+            const match = originalName.match(/(\.[^.]+)$/);
+            const ext = match ? match[1] : '';
+            let newName = pattern.replace('#', String(i++));
+            if (ext && !newName.endsWith(ext)) newName += ext;
+            const newPath = parent ? `${parent}/${newName}` : newName;
+            await fetch(`${API}/workspace/rename`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: p, to: newPath })
+            });
+          }
+          fetchTree();
+        },
+      });
     }
   };
 
@@ -941,16 +958,23 @@ export default function App() {
     if (pathsToCopy.length === 1) {
       const path = pathsToCopy[0];
       const match = path.match(/^(.*?)(\.[^.]+)?$/);
-      const newPath = `${match?.[1]}_copy${match?.[2] || ''}`;
-      const newName = prompt(`Duplicate ${path.split('/').pop()} as:`, newPath);
-      if (!newName || newName === path) return;
-      try {
-        await fetch(`${API}/workspace/copy`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from: path, to: newName })
-        });
-        fetchTree();
-      } catch {}
+      const suggested = `${match?.[1]}_copy${match?.[2] || ''}`;
+      setInputModal({
+        title: `Duplicate ${path.split('/').pop()}`,
+        submitLabel: 'Duplicate',
+        fields: [{ key: 'name', label: 'New name', default: suggested }],
+        onSubmit: async (v) => {
+          const newName = (v.name || '').trim();
+          if (!newName || newName === path) return;
+          try {
+            await fetch(`${API}/workspace/copy`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ from: path, to: newName })
+            });
+            fetchTree();
+          } catch {}
+        },
+      });
     } else {
       for (const p of pathsToCopy) {
         const match = p.match(/^(.*?)(\.[^.]+)?$/);
@@ -964,16 +988,23 @@ export default function App() {
   const uploadAsset = () => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.onchange = async () => {
+    input.onchange = () => {
       const file = input.files?.[0];
       if (!file) return;
-      const folder = (prompt('Destination folder (leave blank for the project root):', 'images') || '').replace(/^\/+|\/+$/g, '');
-      const path = folder ? `${folder}/${file.name}` : file.name;
-      const buf = await file.arrayBuffer();
-      await fetch(`${API}/workspace/upload?path=${encodeURIComponent(path)}`, { method: 'POST', body: buf, headers: { 'Content-Type': 'application/octet-stream' } });
-      await fetchTree();
-      const ext = (file.name.split('.').pop() || '').toLowerCase();
-      if (IMG_EXT.includes(ext)) insertCode(`\n#figure(\n  image("${path}", width: 80%),\n  caption: [],\n)\n`);
+      setInputModal({
+        title: `Upload ${file.name}`,
+        submitLabel: 'Upload',
+        fields: [{ key: 'folder', label: 'Destination folder', default: 'images', placeholder: '(project root)', hint: 'Leave blank to upload into the project root' }],
+        onSubmit: async (v) => {
+          const folder = (v.folder || '').trim().replace(/^\/+|\/+$/g, '');
+          const path = folder ? `${folder}/${file.name}` : file.name;
+          const buf = await file.arrayBuffer();
+          await fetch(`${API}/workspace/upload?path=${encodeURIComponent(path)}`, { method: 'POST', body: buf, headers: { 'Content-Type': 'application/octet-stream' } });
+          await fetchTree();
+          const ext = (file.name.split('.').pop() || '').toLowerCase();
+          if (IMG_EXT.includes(ext)) insertCode(`\n#figure(\n  image("${path}", width: 80%),\n  caption: [],\n)\n`);
+        },
+      });
     };
     input.click();
   };
@@ -1040,10 +1071,14 @@ export default function App() {
       if (!file) return;
       const buf = await file.arrayBuffer();
       const detected = readFontFamily(buf) || file.name.replace(/\.(ttf|otf)$/i, '');
-      const family = window.prompt('Font family name for #set text(font: "…")\n(auto-detected from the file — edit if needed):', detected);
       await fetch(`${API}/workspace/upload?path=${encodeURIComponent('fonts/' + file.name)}`, { method: 'POST', body: buf, headers: { 'Content-Type': 'application/octet-stream' } });
       await fetchTree();
-      if (family && family.trim()) applyDocumentFont(family.trim());
+      setInputModal({
+        title: 'Import Font',
+        submitLabel: 'Use font',
+        fields: [{ key: 'family', label: 'Font family name', default: detected, hint: 'Auto-detected from the file — edit if needed. Used in #set text(font: "…")' }],
+        onSubmit: (v) => { if (v.family && v.family.trim()) applyDocumentFont(v.family.trim()); },
+      });
     };
     input.click();
   };
@@ -3520,11 +3555,20 @@ export default function App() {
                 fetchTree(); setContextMenu(null);
               }}>Paste</div>
               <div className="dropdown-divider"></div>
-              <div className="dropdown-item" onClick={async () => {
-                const name = prompt('Archive name:', 'archive.zip');
-                if (!name) return;
-                await fetch(`${API}/workspace/compress`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paths: selectedPaths, archiveName: name }) });
-                fetchTree(); setContextMenu(null);
+              <div className="dropdown-item" onClick={() => {
+                const paths = selectedPaths;
+                setContextMenu(null);
+                setInputModal({
+                  title: `Compress ${paths.length} item${paths.length > 1 ? 's' : ''}`,
+                  submitLabel: 'Compress',
+                  fields: [{ key: 'name', label: 'Archive name', default: 'archive.zip', hint: 'Saved as a .zip in the project root' }],
+                  onSubmit: async (v) => {
+                    const name = (v.name || '').trim();
+                    if (!name) return;
+                    await fetch(`${API}/workspace/compress`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paths, archiveName: name }) });
+                    fetchTree();
+                  },
+                });
               }}>Compress {selectedPaths.length > 1 ? `(${selectedPaths.length})` : ''}</div>
               <div className="dropdown-divider"></div>
               <div className="dropdown-item" style={{ color: '#ef4444' }} onClick={async () => {
