@@ -191,8 +191,46 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             use tauri::Manager;
+
+            // Auto-update: on launch, check the release feed; if a newer signed
+            // build exists, ASK the user, then download + install + relaunch.
+            // Fully in Rust (the UI is served from a local http URL). Best-effort:
+            // a failed/absent check never blocks startup.
+            let up_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                use tauri_plugin_updater::UpdaterExt;
+                if let Ok(updater) = up_handle.updater() {
+                    if let Ok(Some(update)) = updater.check().await {
+                        let notes = update.body.clone().unwrap_or_default();
+                        let msg = format!(
+                            "Hilbert {} is available (you have {}).\n\n{}\nUpdate now? The app will restart.",
+                            update.version, update.current_version,
+                            if notes.is_empty() { String::new() } else { format!("{}\n\n", notes.chars().take(300).collect::<String>()) }
+                        );
+                        let h2 = up_handle.clone();
+                        up_handle
+                            .dialog()
+                            .message(msg)
+                            .title("Update available")
+                            .kind(MessageDialogKind::Info)
+                            .buttons(MessageDialogButtons::OkCancelCustom("Update now".into(), "Later".into()))
+                            .show(move |accepted| {
+                                if accepted {
+                                    tauri::async_runtime::spawn(async move {
+                                        if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+                                            h2.restart();
+                                        }
+                                    });
+                                }
+                            });
+                    }
+                }
+            });
+
             let resource_dir = app.path().resource_dir().ok();
             set_bundled_tinymist(resource_dir.as_deref());
 

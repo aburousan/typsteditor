@@ -12,9 +12,18 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/aburousan/hilbert-editor/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFMjE1Mjc3MTM5OTg4ODgKUldTSWlKa1RkMUloYnQrQWVueFMrejk2ZEQzY09MZWttY0RYZHp1R3NVdS8vc2xDbkZiNmRocTIK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": false,
     "category": "Productivity",
     "icon": [
       "icons/32x32.png",

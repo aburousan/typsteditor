@@ -55,6 +55,11 @@ jobs:
           workspaces: src-tauri
 
       - uses: tauri-apps/tauri-action@v0
+        env:
+          # Signs the auto-updater artifacts. Add the private key (contents of
+          # ~/Desktop/hilbert-updater-private.key) as a repo secret to enable updates.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           projectPath: .
           args: ${{ matrix.args }}
@@ -68,3 +73,6 @@ jobs:
             src-tauri/target/**/release/bundle/**/*.dmg
             src-tauri/target/**/release/bundle/**/*.msi
             src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.sig
+            src-tauri/target/**/release/bundle/**/*.tar.gz
+            src-tauri/target/**/release/bundle/**/*.zip

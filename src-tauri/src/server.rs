@@ -463,6 +463,11 @@ fn search_walk(dir: &Path, ws: &Path, q: &str, out: &mut Vec<Value>) {
         if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp" | "zip" | "tar" | "gz") {
             continue;
         }
+        // Skip very large files — reading a huge data file into memory would stall
+        // search and spike RAM.
+        if meta.len() > 2 * 1024 * 1024 {
+            continue;
+        }
         let Ok(bytes) = fs::read(&full) else { continue };
         let Ok(content) = String::from_utf8(bytes) else { continue };
         if !content.to_lowercase().contains(q) {
