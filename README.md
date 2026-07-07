@@ -5,6 +5,13 @@
 > the Typst team. "Typst" is a trademark of its respective owners; this project
 > merely builds on top of the open-source Typst compiler.
 
+> **🔄 Automatic updates:** the **[Tauri build](https://github.com/aburousan/hilbert-editor/releases/latest)**
+> updates itself — install it once and every future version arrives on its own
+> (it asks before installing). This only works if you install *that* build, so
+> grab it from the [latest release](https://github.com/aburousan/hilbert-editor/releases/latest).
+> The Electron build and older versions don't auto-update. *(On Linux, the
+> **AppImage** auto-updates; the `.deb` does not.)*
+
 I wanted an offline, Overleaf-feeling place to write physics and maths in
 [Typst](https://typst.app) — a real code editor on the left, a live PDF on the
 right, and all the fiddly stuff (equations, figures, plots, theorems, citations)
