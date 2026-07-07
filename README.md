@@ -5,6 +5,9 @@
 > the Typst team. "Typst" is a trademark of its respective owners; this project
 > merely builds on top of the open-source Typst compiler.
 
+> **🌐 Website:** **[rousan.netlify.app/hilbert](https://rousan.netlify.app/hilbert/)** — the
+> landing page, with a feature overview and download links.
+
 > **🔄 Automatic updates:** the **[Tauri build](https://github.com/aburousan/hilbert-editor/releases/latest)**
 > updates itself — install it once and every future version arrives on its own (it
 > asks before installing). This only works if you install *that* build, so grab it
@@ -262,8 +265,10 @@ must be on your `PATH`:
 
 ## Get it
 
-Prebuilt installers are on the [**Releases**](https://github.com/aburousan/hilbert-editor/releases)
-page. **Two editions:**
+The **[landing page](https://rousan.netlify.app/hilbert/)** has an overview and
+download links. Prebuilt installers are on the
+[**Releases**](https://github.com/aburousan/hilbert-editor/releases) page.
+**Two editions:**
 
 - **Tauri** (recommended) — tiny (~9 MB) and light on memory, and it **auto-updates**.
 - **Electron** — the reference build; heavier, no auto-update.
@@ -286,6 +291,9 @@ your `PATH`.
 > xattr -cr "/Applications/Hilbert.app"
 > codesign --force --deep --sign - "/Applications/Hilbert.app"
 > ```
+> **Run these as two separate commands — one per line.** If you paste them joined onto a
+> single line, the shell reads `--force` as an option to `xattr` and reports it as
+> unrecognised. Enter the first line, press return, then the second.
 > *(Adjust the path if the app is elsewhere, e.g. `~/Downloads`.)* The code is open —
 > you can audit or build it yourself. This is a one-time step.
 
@@ -340,7 +348,9 @@ cd hilbert-editor ; npm install ; npm run dev   # then open http://localhost:517
 ## Troubleshooting
 
 - **macOS says the app is "damaged" / won't open** — Gatekeeper quarantine or a broken
-  signature from renaming the `.app`. Fix with the two commands in [Get it](#get-it):
+  signature from renaming the `.app`. Fix with the two commands in [Get it](#get-it) —
+  run them **one per line, as two separate commands** (pasting them onto one line makes
+  the shell treat `--force` as an argument to `xattr` and it errors):
   ```bash
   xattr -cr "/Applications/Hilbert.app"
   codesign --force --deep --sign - "/Applications/Hilbert.app"
