@@ -595,9 +595,20 @@ async fn init_template(State(st): St, body: Bytes) -> Response {
     let files: Vec<String> = fs::read_dir(&ws)
         .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
         .unwrap_or_default();
-    let typ = files.iter().find(|f| f.ends_with(".typ")).cloned().unwrap_or_else(|| "main.typ".into());
-    match fs::read_to_string(ws.join(&typ)) {
-        Ok(content) => Json(json!({ "code": content })).into_response(),
+    // `typst init` prints the real entrypoint, e.g. `> typst watch main.typ`.
+    // Trust that over "first .typ alphabetically" so multi-file templates open the
+    // correct entry (a chapter file could otherwise sort ahead of it).
+    static ENTRY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?:watch|compile)\s+"?([^\s"]+\.typ)"#).unwrap());
+    let haystack = format!("{}\n{}", out.stdout, out.stderr);
+    let entry = ENTRY_RE
+        .captures(&haystack)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+        .filter(|e| ws.join(e).exists())
+        .or_else(|| if files.iter().any(|f| f == "main.typ") { Some("main.typ".into()) } else { files.iter().find(|f| f.ends_with(".typ")).cloned() })
+        .unwrap_or_else(|| "main.typ".into());
+    match fs::read_to_string(ws.join(&entry)) {
+        Ok(content) => Json(json!({ "code": content, "entrypoint": entry })).into_response(),
         Err(_) => json_err(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read template files"),
     }
 }
