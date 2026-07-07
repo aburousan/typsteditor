@@ -60,8 +60,10 @@
     }
   },
   "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.1",
     "cors": "^2.8.6",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "react-image-crop": "^11.1.2"
   },
   "devDependencies": {
     "@monaco-editor/react": "^4.7.0",

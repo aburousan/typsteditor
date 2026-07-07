@@ -64,14 +64,13 @@ function getTree(dir) {
   const items = readdirSync(dir);
   const result = [];
   for (const item of items) {
-    // Hide dotfiles, node_modules, the sandbox scratch dir and build output.
     if (item.startsWith('.') || item === 'node_modules' || item === 'sandbox' || item.endsWith('.pdf')) continue;
     const fullPath = join(dir, item);
     const stat = statSync(fullPath);
     if (stat.isDirectory()) {
       result.push({ type: 'directory', name: item, path: relative(WORKSPACE_DIR, fullPath).replace(/\\/g, '/'), children: getTree(fullPath) });
     } else {
-      result.push({ type: 'file', name: item, path: relative(WORKSPACE_DIR, fullPath).replace(/\\/g, '/') });
+      result.push({ type: 'file', name: item, path: relative(WORKSPACE_DIR, fullPath).replace(/\\/g, '/'), size: stat.size, mtime: stat.mtimeMs });
     }
   }
   return result;
@@ -122,6 +121,52 @@ app.get('/workspace/file', (req, res) => {
   } catch (e) { res.status(404).send('Not found'); }
 });
 
+app.get('/workspace/search', (req, res) => {
+  const q = (req.query.q || '').toLowerCase();
+  if (!q) return res.json([]);
+  
+  const results = [];
+  const walk = (dir) => {
+    for (const item of readdirSync(dir)) {
+      if (item.startsWith('.') || item === 'node_modules' || item === 'sandbox' || item.endsWith('.pdf')) continue;
+      const full = join(dir, item);
+      const stat = statSync(full);
+      if (stat.isDirectory()) {
+        walk(full);
+      } else {
+        const ext = (item.split('.').pop() || '').toLowerCase();
+        if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'zip', 'tar', 'gz'].includes(ext)) continue;
+        try {
+          const content = readFileSync(full, 'utf-8');
+          if (content.toLowerCase().includes(q)) {
+            const lines = content.split('\n');
+            const matches = [];
+            lines.forEach((line, i) => {
+              if (line.toLowerCase().includes(q)) {
+                matches.push({ lineNum: i + 1, text: line.trim() });
+              }
+            });
+            if (matches.length > 0) {
+              results.push({
+                path: relative(WORKSPACE_DIR, full).replace(/\\/g, '/'),
+                matches
+              });
+            }
+          }
+        } catch(e) {}
+      }
+    }
+  };
+  try { walk(WORKSPACE_DIR); } catch(e) {}
+  res.json(results);
+});
+
+app.get('/workspace/raw', (req, res) => {
+  const full = safeWorkspacePath(req.query.path);
+  if (!full) return res.status(400).send('Invalid path');
+  res.sendFile(full);
+});
+
 app.post('/workspace/file', (req, res) => {
   const full = safeWorkspacePath(req.query.path);
   if (!full) return res.status(400).send('Invalid path');
@@ -138,6 +183,36 @@ app.post('/workspace/mkdir', (req, res) => {
   if (!full) return res.status(400).send('Invalid path');
   try { mkdirSync(full, { recursive: true }); res.send('OK'); }
   catch (e) { res.status(500).send('Error'); }
+});
+
+// Compress multiple files into a zip archive
+app.post('/workspace/compress', (req, res) => {
+  const { paths, archiveName } = req.body || {};
+  if (!Array.isArray(paths) || paths.length === 0) return res.status(400).json({ error: 'Paths required' });
+  const outPath = safeWorkspacePath(archiveName || 'archive.zip');
+  if (!outPath) return res.status(400).json({ error: 'Invalid archive name' });
+  
+  const validPaths = paths.map(p => safeWorkspacePath(p)).filter(Boolean);
+  if (validPaths.length === 0) return res.status(400).json({ error: 'No valid paths' });
+  
+  try {
+    const relPaths = validPaths.map(p => relative(WORKSPACE_DIR, p));
+    const child = spawn('zip', ['-r', outPath, ...relPaths], { cwd: WORKSPACE_DIR });
+    let done = false;
+    // If `zip` isn't installed (common on Windows), spawn emits 'error' — without
+    // this handler the response would hang forever. Reply once, cleanly.
+    child.on('error', e => {
+      if (done) return; done = true;
+      res.status(500).json({ error: e.code === 'ENOENT' ? 'The `zip` command was not found on this system.' : String(e.message || e) });
+    });
+    child.on('close', code => {
+      if (done) return; done = true;
+      if (code === 0) res.json({ ok: true });
+      else res.status(500).json({ error: 'Compression failed with code ' + code });
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
 });
 
 // Upload a binary asset (e.g. an image) into the workspace.
@@ -231,7 +306,7 @@ app.post('/compile', (req, res) => {
   // Make any fonts the user imported into <workspace>/fonts discoverable by the
   // compiler so `#set text(font: "…")` works with custom .ttf/.otf files.
   const fontArgs = existsSync(join(WORKSPACE_DIR, 'fonts')) ? ['--font-path', 'fonts'] : [];
-  const typstProcess = spawn('typst', ['compile', ...fontArgs, mainPath, outputPath], { cwd: WORKSPACE_DIR });
+  const typstProcess = spawn('typst', ['compile', '--root', '.', ...fontArgs, mainPath, outputPath], { cwd: WORKSPACE_DIR });
   let stderr = '';
   let responded = false;
   typstProcess.stderr.on('data', data => { stderr += data.toString(); });
@@ -359,9 +434,9 @@ const isRepo = () => existsSync(join(WORKSPACE_DIR, '.git'));
 app.get('/git/status', async (req, res) => {
   if (!isRepo()) return res.json({ initialized: false });
   const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD']);
-  const status = await git(['status', '--short']);
+  const status = await git(['status', '--porcelain']);
   const remote = await git(['remote', 'get-url', 'origin']);
-  const files = status.stdout.split('\n').filter(Boolean).map(l => l.trim());
+  const files = status.stdout.split('\n').filter(Boolean);
   res.json({
     initialized: true,
     branch: branch.ok ? branch.stdout.trim() : 'main',
@@ -485,7 +560,7 @@ app.post('/export', (req, res) => {
     if (format === 'pdf' || format === 'html') {
       const ext = format === 'html' ? 'html' : 'pdf';
       const target = join(folder, `${name || 'document'}.${ext}`);
-      const args = ['compile', '--format', ext, ...(format === 'html' ? ['--features', 'html'] : []), join(WORKSPACE_DIR, mainFile), target];
+      const args = ['compile', '--root', '.', '--format', ext, ...(format === 'html' ? ['--features', 'html'] : []), join(WORKSPACE_DIR, mainFile), target];
       const proc = spawn('typst', args, { cwd: WORKSPACE_DIR });
       let err = '';
       proc.stderr.on('data', d => { err += d.toString(); });
@@ -504,7 +579,7 @@ app.get('/compile/html', (req, res) => {
   const mainPath = safeWorkspacePath(req.query.main || 'main.typ');
   if (!mainPath) return res.status(400).json({ error: 'Invalid main path' });
   const out = join(WORKSPACE_DIR, '.out.html');
-  const proc = spawn('typst', ['compile', '--format', 'html', '--features', 'html', mainPath, out], { cwd: WORKSPACE_DIR });
+  const proc = spawn('typst', ['compile', '--root', '.', '--format', 'html', '--features', 'html', mainPath, out], { cwd: WORKSPACE_DIR });
   let err = '';
   proc.stderr.on('data', d => { err += d.toString(); });
   proc.on('error', e => { if (!res.headersSent) res.status(500).json({ error: e.code === 'ENOENT' ? 'Typst compiler not found — install the Typst CLI so `typst --version` works.' : String(e.message) }); });
@@ -528,7 +603,7 @@ function collectWorkspace(dir = WORKSPACE_DIR, prefix = '') {
 
 function compileToPdf(mainPath, outPath) {
   return new Promise((resolve) => {
-    const proc = spawn('typst', ['compile', mainPath, outPath], { cwd: WORKSPACE_DIR });
+    const proc = spawn('typst', ['compile', '--root', '.', mainPath, outPath], { cwd: WORKSPACE_DIR });
     const timer = setTimeout(() => proc.kill('SIGKILL'), 30000);
     proc.on('error', () => { clearTimeout(timer); resolve(false); });
     proc.on('close', code => { clearTimeout(timer); resolve(code === 0 && existsSync(outPath)); });

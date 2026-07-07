@@ -13,6 +13,7 @@ class ErrorBoundary extends React.Component<any, any> {
   }
 }
 
+(window as any).logTiming('React mounted');
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>

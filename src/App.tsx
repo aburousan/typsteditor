@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
 import { API } from './api';
 import Editor, { useMonaco } from '@monaco-editor/react';
+import ImageEditor from './ImageEditor';
+import ExcalidrawEditor from './ExcalidrawEditor';
 import { setupTypstLanguage, setWorkspaceImages } from './typstMonaco';
 import { PackageInstaller } from './PackageInstaller';
 import { TemplateInstaller } from './TemplateInstaller';
@@ -79,7 +81,15 @@ const THEOREM_SETUP = `#import "@preview/lemming:0.3.1" as lem
 #let proof = lem.proof
 #show: lem.prepare()`;
 
-type FileNode = { type: 'file' | 'directory'; name: string; path: string; children?: FileNode[] };
+interface FileNode {
+  name: string;
+  path: string;
+  type: 'file' | 'directory';
+  children?: FileNode[];
+  size?: number;
+  mtime?: number;
+  matches?: { lineNum: number; text: string }[];
+}
 type Tab = { path: string; content: string; isDirty: boolean };
 
 const DEFAULT_CODE = `#set page(paper: "a4")
@@ -208,11 +218,30 @@ const PHYSICS_EQS: { group: string, name: string, physica?: boolean, code: strin
   { group: 'GR & Cosmology', name: 'Friedmann equations', code: '(dot(a)/a)^2 = (8 pi G)/3 rho - (k c^2)/a^2 + Lambda/3, quad dot(rho) = -3 H (rho + p/c^2)' },
 ];
 
+type SearchSnippet = { lineNum: number; text: string };
+type SearchResult = { path: string; matches: SearchSnippet[] };
+
 export default function App() {
   const editorRef = useRef<any>(null);
   const [tabs, setTabs] = useState<Tab[]>([{ path: 'main.typ', content: DEFAULT_CODE, isDirty: true }]);
   const [activeTabPath, setActiveTabPath] = useState<string>('main.typ');
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
+  const [treeSearch, setTreeSearch] = useState<string>('');
+  const [isSearchVisible, setIsSearchVisible] = useState<boolean>(false);
+  const [searchContentResults, setSearchContentResults] = useState<SearchResult[]>([]);
+  useEffect(() => {
+    if (!treeSearch) {
+      setSearchContentResults([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API}/workspace/search?q=${encodeURIComponent(treeSearch)}`);
+        if (res.ok) setSearchContentResults(await res.json());
+      } catch (e) {}
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [treeSearch]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   // Word count of the RENDERED document (reported by PdfPreview from the PDF's
@@ -293,6 +322,18 @@ export default function App() {
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, node?: FileNode, type: 'file' | 'folder' | 'empty' } | null>(null);
   const [fileClipboard, setFileClipboard] = useState<{ path: string, type: 'copy' | 'cut' } | null>(null);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState<string>('');
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null);
+  // Folders the user has collapsed. Kept in React state (not the DOM) so the
+  // fold state survives tree re-renders triggered by selection / git updates.
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+  const toggleDir = (path: string) => setCollapsedDirs(prev => {
+    const next = new Set(prev);
+    next.has(path) ? next.delete(path) : next.add(path);
+    return next;
+  });
   const [projectName, setProjectName] = useState('Project Report');
   const [editingTitle, setEditingTitle] = useState(false);
   const [inputModal, setInputModal] = useState<InputModalConfig | null>(null);
@@ -320,7 +361,18 @@ export default function App() {
   // Keep the editor's image-path autocomplete (inside image("…")) in sync with
   // the workspace's image files.
   useEffect(() => { setWorkspaceImages(workspaceImages); }, [workspaceImages]);
-  useEffect(() => { fetchTree(); }, []);
+  useEffect(() => { 
+    fetchTree(); 
+    fetch(`${API}/lsp/hover`, { method: 'POST', body: JSON.stringify({ file: 'main.typ', line: 0, character: 0, content: '' }), headers: {'Content-Type': 'application/json'} })
+      .then(() => {
+        const w = (window as any);
+        if (!w._hasLoggedTinymist) {
+          w._hasLoggedTinymist = true;
+          w.logTiming('Tinymist connected');
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -377,7 +429,15 @@ export default function App() {
   const fetchTree = async () => {
     try {
       const res = await fetch(`${API}/workspace`);
-      if (res.ok) setFileTree(await res.json());
+      if (res.ok) {
+        setFileTree(await res.json());
+        const w = (window as any);
+        if (!w._hasLoggedBackend) {
+          w._hasLoggedBackend = true;
+          w.logTiming('Backend connected');
+          w.logTiming('Workspace indexed');
+        }
+      }
     } catch(e) {}
   };
 
@@ -393,6 +453,7 @@ export default function App() {
           if (tab.isDirty) syncToDisk(tab.path, tab.content);   // mirror edits to the opened folder on disk
         }
       }
+      fetchTree();
       
       const res = await fetch(`${API}/compile?main=${encodeURIComponent(mainFile)}`, { method: 'POST' });
       if (!res.ok) {
@@ -409,6 +470,12 @@ export default function App() {
       setErrorLogs(null);
       setCompileError(null);
       
+      const w = (window as any);
+      if (!w._hasLoggedCompile) {
+        w._hasLoggedCompile = true;
+        w.logTiming('First compile');
+      }
+
       setHistory(prev => {
         let newHistory = [...prev];
         for (const tab of tabs) {
@@ -455,7 +522,14 @@ export default function App() {
     }
   };
 
-  const currentMain = activeTabPath && activeTabPath.endsWith('.typ') ? activeTabPath : 'main.typ';
+  // Remember the last .typ file the user had open. When they switch to a
+  // non-.typ tab (a .bib, .toml, .svg, …) we keep previewing that last .typ
+  // instead of trying to compile the non-Typst file.
+  const [lastTypPath, setLastTypPath] = useState<string>('');
+  useEffect(() => {
+    if (activeTabPath && activeTabPath.endsWith('.typ')) setLastTypPath(activeTabPath);
+  }, [activeTabPath]);
+  const currentMain = activeTabPath && activeTabPath.endsWith('.typ') ? activeTabPath : (lastTypPath || 'main.typ');
   const [lastCompiledPath, setLastCompiledPath] = useState<string>('');
 
   const saveActiveFile = useCallback(async () => {
@@ -541,50 +615,49 @@ export default function App() {
   };
 
   const IMG_EXT = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp'];
+  
   const openFile = async (path: string) => {
-    const ext = (path.split('.').pop() || '').toLowerCase();
-    // Images/binaries aren't text — clicking one inserts a reference instead.
-    if (IMG_EXT.includes(ext)) {
-      insertCode(`\n#figure(\n  image("${path}", width: 80%),\n  caption: [],\n)\n`);
-      return;
-    }
     if (!tabs.find(t => t.path === path)) {
-      try {
-        const res = await fetch(`${API}/workspace/file?path=${encodeURIComponent(path)}`);
-        if (res.ok) {
-          const content = await res.text();
-          setTabs(prev => [...prev, { path, content, isDirty: false }]);
-        }
-      } catch (e) {}
     }
+    
+    // Check if it's an image
+    const ext = (path.split('.').pop() || '').toLowerCase();
+    if (IMG_EXT.includes(ext)) {
+      // Don't try to fetch text content for images
+      if (!tabs.find(t => t.path === path)) {
+        setTabs(prev => [...prev, { path, content: '', isDirty: false }]);
+      }
+    } else {
+      if (!tabs.find(t => t.path === path)) {
+        try {
+          const res = await fetch(`${API}/workspace/file?path=${encodeURIComponent(path)}`);
+          if (res.ok) {
+            const content = await res.text();
+            setTabs(prev => [...prev, { path, content, isDirty: false }]);
+          }
+        } catch (e) {}
+      }
+    }
+    
     setActiveTabPath(path);
   };
 
   const closeTab = (e: React.MouseEvent, path: string) => {
     e.stopPropagation();
+    // Dispose the Monaco model for this file. @monaco-editor/react keeps every
+    // model it creates in Monaco's global registry, so without this each
+    // opened-then-closed file leaves a model holding the whole document behind —
+    // a slow leak over a long editing session.
+    if (monaco) {
+      const model = monaco.editor.getModels().find(m => m.uri.path.replace(/^\//, '') === path);
+      try { model?.dispose(); } catch {}
+    }
     setTabs(prev => {
       const newTabs = prev.filter(t => t.path !== path);
       if (activeTabPath === path && newTabs.length > 0) setActiveTabPath(newTabs[newTabs.length - 1].path);
       else if (newTabs.length === 0) setActiveTabPath('');
       return newTabs;
     });
-  };
-
-  const deleteEntry = async (e: React.MouseEvent, path: string, isDir: boolean) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!confirm(`Delete ${isDir ? 'folder' : 'file'} "${path}"?${isDir ? '\nAll of its contents will be removed.' : ''}`)) return;
-    try {
-      await fetch(`${API}/workspace/file?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
-    } catch {}
-    setTabs(prev => {
-      const remaining = prev.filter(t => t.path !== path && !t.path.startsWith(path + '/'));
-      if (activeTabPath === path || activeTabPath.startsWith(path + '/')) {
-        setActiveTabPath(remaining.length ? remaining[remaining.length - 1].path : '');
-      }
-      return remaining;
-    });
-    fetchTree();
   };
 
   const createNewFile = async (basePath?: string | React.MouseEvent) => {
@@ -606,16 +679,204 @@ export default function App() {
     fetchTree();
   };
 
-  const handleRename = async (node: FileNode) => {
-    const newName = prompt(`Rename ${node.name} to:`, node.name);
+  const handleNodeClick = (e: React.MouseEvent, path: string, isDir: boolean) => {
+    if (e && e.stopPropagation) e.stopPropagation();
+    if (renamingPath === path) return;
+    const treeEl = document.querySelector('.file-tree') as HTMLElement;
+    if (treeEl) treeEl.focus();
+    
+    if (e && (e.ctrlKey || e.metaKey)) {
+      setSelectedPaths(prev => prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path]);
+      setLastSelectedPath(path);
+    } else if (e.shiftKey && lastSelectedPath) {
+      const elements = Array.from(document.querySelectorAll('.tree-node [data-path]'));
+      const paths = elements.map(el => el.getAttribute('data-path') as string);
+      const startIdx = paths.indexOf(lastSelectedPath);
+      const endIdx = paths.indexOf(path);
+      if (startIdx !== -1 && endIdx !== -1) {
+        const min = Math.min(startIdx, endIdx);
+        const max = Math.max(startIdx, endIdx);
+        const range = paths.slice(min, max + 1);
+        setSelectedPaths(prev => Array.from(new Set([...prev, ...range])));
+      }
+    } else {
+      setSelectedPaths([path]);
+      setLastSelectedPath(path);
+      if (!isDir) openFile(path);
+    }
+  };
+
+  const handleNodeContextMenu = (e: React.MouseEvent, node: FileNode, type: 'file' | 'folder') => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!selectedPaths.includes(node.path)) {
+      setSelectedPaths([node.path]);
+      setLastSelectedPath(node.path);
+    }
+    setContextMenu({ x: e.clientX, y: e.clientY, node, type });
+  };
+
+  const handleDragStart = (e: React.DragEvent, path: string) => {
+    e.stopPropagation();
+    const dragPaths = selectedPaths.includes(path) ? selectedPaths : [path];
+    e.dataTransfer.setData('text/plain', JSON.stringify(dragPaths));
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleFileTreeKeyDown = async (e: React.KeyboardEvent) => {
+    if (selectedPaths.length === 0) return;
+
+    if (e.key === 'Backspace' || e.key === 'Delete') {
+      e.preventDefault();
+      if (!confirm(`Delete ${selectedPaths.length} items?`)) return;
+      for (const p of selectedPaths) await fetch(`${API}/workspace/file?path=${encodeURIComponent(p)}`, { method: 'DELETE' });
+      setSelectedPaths([]); fetchTree();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      handleRename();
+    } else if (e.key === 'c' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      setFileClipboard({ path: selectedPaths[0], type: 'copy' });
+    } else if (e.key === 'x' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      setFileClipboard({ path: selectedPaths[0], type: 'cut' });
+    } else if (e.key === 'v' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (!fileClipboard) return;
+      // Paste into the first selected folder, or the parent of the first selected file
+      let targetDir = '';
+      if (selectedPaths.length > 0) {
+        const first = selectedPaths[0];
+        // We don't have the node type easily here without searching the tree, but we can guess or just fetch
+        const isSelectedDir = fileTree.some(n => {
+           const search = (nodes: FileNode[]): boolean => {
+             for (const no of nodes) {
+               if (no.path === first) return no.type === 'directory';
+               if (no.children) {
+                 const res = search(no.children);
+                 if (res) return true;
+               }
+             }
+             return false;
+           };
+           return search([n]);
+        });
+        targetDir = isSelectedDir ? first : (first.includes('/') ? first.substring(0, first.lastIndexOf('/')) : '');
+      }
+      const toPath = targetDir ? `${targetDir}/${fileClipboard.path.split('/').pop()}` : fileClipboard.path.split('/').pop();
+      await fetch(`${API}/workspace/${fileClipboard.type === 'cut' ? 'rename' : 'copy'}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: fileClipboard.path, to: toPath }) });
+      fetchTree();
+    }
+  };
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleDrop = async (e: React.DragEvent, targetDir: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      // 1. Handle OS file drops (uploads)
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        const files = Array.from(e.dataTransfer.files);
+        for (const file of files) {
+          const newPath = targetDir ? `${targetDir}/${file.name}` : file.name;
+          const arrayBuffer = await file.arrayBuffer();
+          await fetch(`${API}/workspace/upload?path=${encodeURIComponent(newPath)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: arrayBuffer
+          });
+        }
+        fetchTree();
+        return;
+      }
+
+      // 2. Handle Internal File tree drag and drop
+      const data = e.dataTransfer.getData('text/plain');
+      if (!data) return;
+      const pathsToMove: string[] = JSON.parse(data);
+      let successCount = 0;
+      for (const p of pathsToMove) {
+        if (p === targetDir || targetDir.startsWith(p + '/')) continue;
+        const filename = p.split('/').pop() || '';
+        const newPath = targetDir ? `${targetDir}/${filename}` : filename;
+        if (p !== newPath) {
+          const res = await fetch(`${API}/workspace/rename`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from: p, to: newPath })
+          });
+          if (res.ok) {
+            successCount++;
+            setTabs(prev => prev.map(t => {
+              if (t.path === p) return { ...t, path: newPath };
+              if (t.path.startsWith(p + '/')) return { ...t, path: newPath + t.path.substring(p.length) };
+              return t;
+            }));
+            if (activeTabPath === p) setActiveTabPath(newPath);
+            else if (activeTabPath.startsWith(p + '/')) setActiveTabPath(newPath + activeTabPath.substring(p.length));
+          } else {
+            const err = await res.json();
+            alert(`Failed to move ${p}: ${err.error || 'Unknown error'}`);
+          }
+        }
+      }
+      if (successCount > 0) setSelectedPaths([]);
+      fetchTree();
+    } catch (err: any) {
+      alert(`Drag and drop failed: ${err.message || err}`);
+    }
+  };
+
+  const handleRename = (node?: FileNode) => {
+    const paths = node && !selectedPaths.includes(node.path) ? [node.path] : (selectedPaths.length > 0 ? selectedPaths : (node ? [node.path] : []));
+    if (paths.length === 0) return;
+    if (paths.length === 1) {
+      const p = paths[0];
+      setRenamingPath(p);
+      setRenameValue(p.split('/').pop() || '');
+    } else {
+      const pattern = prompt(`Rename ${paths.length} items to (e.g. file_#):`, 'file_#');
+      if (!pattern) return;
+      (async () => {
+        let i = 1;
+        for (const p of paths) {
+          const parent = p.includes('/') ? p.substring(0, p.lastIndexOf('/')) : '';
+          const originalName = p.split('/').pop() || '';
+          const match = originalName.match(/(\.[^.]+)$/);
+          const ext = match ? match[1] : '';
+          let newName = pattern.replace('#', String(i++));
+          if (ext && !newName.endsWith(ext)) newName += ext;
+          const newPath = parent ? `${parent}/${newName}` : newName;
+          await fetch(`${API}/workspace/rename`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: p, to: newPath })
+          });
+        }
+        fetchTree();
+      })();
+    }
+  };
+
+  const commitRename = async (node: FileNode, newName: string) => {
+    setRenamingPath(null);
     if (!newName || newName === node.name) return;
     const parentPath = node.path.includes('/') ? node.path.substring(0, node.path.lastIndexOf('/')) : '';
     const newPath = parentPath ? `${parentPath}/${newName}` : newName;
     try {
-      await fetch(`${API}/workspace/rename`, {
+      const res = await fetch(`${API}/workspace/rename`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ from: node.path, to: newPath })
       });
+      if (!res.ok) throw new Error('Rename failed');
       if (node.type === 'file') {
         setTabs(prev => prev.map(t => t.path === node.path ? { ...t, path: newPath } : t));
         if (activeTabPath === node.path) setActiveTabPath(newPath);
@@ -627,50 +888,48 @@ export default function App() {
     } catch {}
   };
 
-  const handleDuplicate = async (node: FileNode) => {
-    let newPath = node.path;
-    if (node.type === 'file') {
-      const match = node.path.match(/^(.*?)(\.[^.]+)?$/);
-      newPath = `${match?.[1]}_copy${match?.[2] || ''}`;
-    } else {
-      newPath = `${node.path}_copy`;
-    }
-    const newName = prompt(`Duplicate ${node.name} as:`, newPath);
-    if (!newName || newName === node.path) return;
+  const deleteEntry = async (e: React.MouseEvent, path: string, isDir: boolean) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!confirm(`Delete ${isDir ? 'folder' : 'file'} "${path}"?${isDir ? '\\nAll of its contents will be removed.' : ''}`)) return;
     try {
-      await fetch(`${API}/workspace/copy`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from: node.path, to: newName })
-      });
-      fetchTree();
+      await fetch(`${API}/workspace/file?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
     } catch {}
+    setTabs(prev => {
+      const remaining = prev.filter(t => t.path !== path && !t.path.startsWith(path + '/'));
+      if (activeTabPath === path || activeTabPath.startsWith(path + '/')) {
+        setActiveTabPath(remaining.length ? remaining[remaining.length - 1].path : '');
+      }
+      return remaining;
+    });
+    fetchTree();
   };
 
-  const handlePaste = async (targetNode?: FileNode) => {
-    if (!fileClipboard) return;
-    const targetDir = targetNode && targetNode.type === 'directory' ? targetNode.path :
-                      targetNode ? (targetNode.path.includes('/') ? targetNode.path.substring(0, targetNode.path.lastIndexOf('/')) : '') : '';
-    const fileName = fileClipboard.path.split('/').pop()!;
-    const newPath = targetDir ? `${targetDir}/${fileName}` : fileName;
-    try {
-      if (fileClipboard.type === 'cut') {
-        await fetch(`${API}/workspace/rename`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from: fileClipboard.path, to: newPath })
-        });
-        setTabs(prev => prev.map(t => t.path === fileClipboard.path ? { ...t, path: newPath } : t));
-        if (activeTabPath === fileClipboard.path) setActiveTabPath(newPath);
-        setFileClipboard(null);
-      } else {
+  const handleDuplicate = async (node?: FileNode) => {
+    const pathsToCopy = node && !selectedPaths.includes(node.path) ? [node.path] : selectedPaths;
+    if (pathsToCopy.length === 0) return;
+    if (pathsToCopy.length === 1) {
+      const path = pathsToCopy[0];
+      const match = path.match(/^(.*?)(\.[^.]+)?$/);
+      const newPath = `${match?.[1]}_copy${match?.[2] || ''}`;
+      const newName = prompt(`Duplicate ${path.split('/').pop()} as:`, newPath);
+      if (!newName || newName === path) return;
+      try {
         await fetch(`${API}/workspace/copy`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from: fileClipboard.path, to: newPath })
+          body: JSON.stringify({ from: path, to: newName })
         });
+        fetchTree();
+      } catch {}
+    } else {
+      for (const p of pathsToCopy) {
+        const match = p.match(/^(.*?)(\.[^.]+)?$/);
+        const newPath = `${match?.[1]}_copy${match?.[2] || ''}`;
+        await fetch(`${API}/workspace/copy`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: p, to: newPath }) });
       }
       fetchTree();
-    } catch {}
+    }
   };
-
   // Upload any file (images included) into the workspace, optionally into a folder.
   const uploadAsset = () => {
     const input = document.createElement('input');
@@ -1595,6 +1854,30 @@ export default function App() {
     }
   });
 
+  const insertWhiteboard = () => {
+    setInputModal({
+      title: 'New Whiteboard (Excalidraw)',
+      fields: [
+        { key: 'name', label: 'Diagram name (without extension)', default: 'whiteboard_1' },
+      ],
+      submitLabel: 'Create & Open',
+      onSubmit: async (v) => {
+        const base = v.name || 'whiteboard_1';
+        const excalidrawFile = `white_board/${base}.excalidraw`;
+        const svgFile = `white_board/${base}.svg`;
+        const dummySvg = `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><text y="50">Please save drawing...</text></svg>`;
+        const svgBlob = new Blob([dummySvg], { type: 'image/svg+xml' });
+        
+        await fetch(`${API}/workspace/file?path=${encodeURIComponent(excalidrawFile)}`, { method: 'POST', body: '' });
+        await fetch(`${API}/workspace/upload?path=${encodeURIComponent(svgFile)}`, { method: 'POST', body: svgBlob, headers: { 'Content-Type': 'application/octet-stream' } });
+        
+        fetchTree();
+        insertCode(centerWrap(`#image("${svgFile}", width: 60%)`, 'true'));
+        openFile(excalidrawFile);
+      }
+    });
+  };
+
   // Wrap the selected element (figure/table/plot/image/…) in a numbered #figure
   // with a caption, so it gets a "Figure N" number and can be cross-referenced.
   const wrapInFigure = () => {
@@ -2122,7 +2405,7 @@ export default function App() {
   // matched in the source and the editor jumps to it (best effort — works for
   // prose/headings; rendered math may not match the source token).
   const syncDecorations = useRef<string[]>([]);
-  const jumpToWord = useCallback((raw: string, context?: string) => {
+  const jumpToWord = useCallback(async (raw: string, context?: string) => {
     const editor = editorRef.current;
     const model = editor?.getModel();
     if (!editor || !model) return;
@@ -2137,13 +2420,48 @@ export default function App() {
       return c === -1 || m.range.startColumn - 1 < c;
     });
     const matches = real.length ? real : all;
-    if (!matches.length) { setErrorLogs(`"${word}" not found in source (rendered math/symbols may differ).`); return; }
+    
+    const ctxWords = (context || '').toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(w => w.length > 2 && w !== word.toLowerCase());
+    
+    if (!matches.length) { 
+      try {
+        const res = await fetch(`${API}/workspace/search?q=${encodeURIComponent(word)}`);
+        const hits = await res.json();
+        if (Array.isArray(hits) && hits.length > 0) {
+          let bestHit = hits[0];
+          let bestLineNum = hits[0].matches[0].lineNum;
+          if (ctxWords.length > 0) {
+            let bestScore = -1;
+            for (const hit of hits) {
+              for (const m of hit.matches) {
+                const text = m.text.toLowerCase();
+                const score = ctxWords.reduce((n, w) => n + (text.includes(w) ? 1 : 0), 0);
+                if (score > bestScore) { bestScore = score; bestHit = hit; bestLineNum = m.lineNum; }
+              }
+            }
+          }
+          // Jump to the found file and line
+          handleNodeClick({} as any, bestHit.path, false);
+          setTimeout(() => {
+            if (editorRef.current) {
+              editorRef.current.revealLineInCenter(bestLineNum);
+              editorRef.current.setPosition({ lineNumber: bestLineNum, column: 1 });
+              editorRef.current.focus();
+            }
+          }, 100);
+          return;
+        }
+      } catch (e) {}
+      
+      setErrorLogs(`"${word}" not found in source (rendered math/symbols may differ).`); 
+      return; 
+    }
     // Use the surrounding words from the PDF (context) to pick the right instance
     // when the word occurs more than once: score each match by how many of the
     // neighbouring words appear on the same or an adjacent source line.
     const cur = editor.getPosition();
     let next: any;
-    const ctxWords = (context || '').toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(w => w.length > 2 && w !== word.toLowerCase());
+
     if (matches.length > 1 && ctxWords.length) {
       const scoreAt = (m: any) => {
         const from = Math.max(1, m.range.startLineNumber - 1), to = Math.min(model.getLineCount(), m.range.startLineNumber + 1);
@@ -2165,32 +2483,159 @@ export default function App() {
     setTimeout(() => { if (editorRef.current) syncDecorations.current = editorRef.current.deltaDecorations(syncDecorations.current, []); }, 1300);
   }, []);
 
+  const formatBytes = (bytes: number, decimals = 1) => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024, dm = decimals < 0 ? 0 : decimals, sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'], i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+  };
+
+  const formatTime = (ms: number) => {
+    if (!ms) return '';
+    const date = new Date(ms);
+    const isToday = new Date().toDateString() === date.toDateString();
+    return (isToday ? 'Today ' : date.toLocaleDateString() + ' ') + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const getGitStatusForPath = (path: string, isDir: boolean) => {
+    if (isDir) {
+      // Check if any file inside this dir is dirty or untracked
+      const hasDirty = tabs.some(t => t.isDirty && t.path.startsWith(path + '/'));
+      return hasDirty ? 'DIR' : null;
+    }
+    
+    const tab = tabs.find(t => t.path === path);
+    if (tab && tab.isDirty) return 'M';
+    return null;
+  };
+
+  const jumpToSnippetLine = (path: string, lineNum: number) => {
+    handleNodeClick({} as any, path, false);
+    // Let the tab switch and monaco editor update, then jump
+    setTimeout(() => {
+      if (editorRef.current) {
+        editorRef.current.revealLineInCenter(lineNum);
+        editorRef.current.setPosition({ lineNumber: lineNum, column: 1 });
+        editorRef.current.focus();
+      }
+    }, 50);
+  };
+
   const renderTree = (nodes: FileNode[]) => {
     return nodes.map(node => (
       <div key={node.path} className="tree-node">
         {node.type === 'directory' ? (
-          <details open>
-            <summary className="tree-dir" onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setContextMenu({ x: e.clientX, y: e.clientY, node, type: 'folder' }); }}>
+          <div className={`tree-dir-container ${collapsedDirs.has(node.path) ? '' : 'open'}`} onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDrop={e => handleDrop(e, node.path)}>
+            <div data-path={node.path} draggable={true} onDragStart={e => handleDragStart(e, node.path)} className={`tree-dir ${selectedPaths.includes(node.path) ? 'selected' : ''}`} onClick={(e) => { e.preventDefault(); if (!e.ctrlKey && !e.metaKey && !e.shiftKey && renamingPath !== node.path) toggleDir(node.path); handleNodeClick(e, node.path, true); }} onContextMenu={(e) => handleNodeContextMenu(e, node, 'folder')} style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+              <svg className="tree-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ marginRight: '2px', flexShrink: 0, transition: 'transform 0.12s ease' }}><polyline points="9 18 15 12 9 6"></polyline></svg>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-              <span className="tree-name">{node.name}</span>
-              <button className="tree-del" title="Delete folder" onClick={(e) => deleteEntry(e, node.path, true)}>×</button>
-            </summary>
+              {renamingPath === node.path ? (
+                <input autoFocus value={renameValue} onChange={e => setRenameValue(e.target.value)} onBlur={() => setRenamingPath(null)} onKeyDown={e => { if (e.key === 'Enter') commitRename(node, renameValue); if (e.key === 'Escape') setRenamingPath(null); e.stopPropagation(); }} onClick={e => e.stopPropagation()} className="tree-name-input" style={{ flex: 1, background: 'var(--bg-color)', color: 'var(--text-color)', border: '1px solid var(--accent)', padding: '2px 4px', fontSize: 'inherit', outline: 'none' }} />
+              ) : (
+                <>
+                  <span className="tree-name">{node.name}</span>
+                  {getGitStatusForPath(node.path, true) && <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)', marginLeft: 'auto', marginRight: '6px' }} />}
+                  <button className="tree-del" title="Delete folder" onClick={(e) => deleteEntry(e, node.path, true)}>×</button>
+                </>
+              )}
+            </div>
             <div className="tree-children">{node.children && renderTree(node.children)}</div>
-          </details>
+          </div>
         ) : (
-          <div className={`tree-file ${activeTabPath === node.path ? 'active' : ''}`} onClick={() => openFile(node.path)} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setContextMenu({ x: e.clientX, y: e.clientY, node, type: 'file' }); }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
-            <span className="tree-name">{node.name}</span>
-            <button className="tree-del" title="Delete file" onClick={(e) => deleteEntry(e, node.path, false)}>×</button>
+          <div key={node.path} style={{ display: 'flex', flexDirection: 'column' }}>
+            <div data-path={node.path} draggable={true} onDragStart={e => handleDragStart(e, node.path)} onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDrop={e => {
+              const parentDir = node.path.includes('/') ? node.path.substring(0, node.path.lastIndexOf('/')) : '';
+              handleDrop(e, parentDir);
+            }} className={`tree-file ${activeTabPath === node.path ? 'active' : ''} ${selectedPaths.includes(node.path) ? 'selected' : ''}`} onClick={(e) => handleNodeClick(e, node.path, false)} onContextMenu={(e) => handleNodeContextMenu(e, node, 'file')}
+                 title={node.size !== undefined ? `${node.name}\n${formatBytes(node.size)}\nModified: ${formatTime(node.mtime || 0)}\n${node.name.endsWith('.typ') ? 'Typst Document' : 'File'}` : node.name}>
+              <span style={{ width: '14px', flexShrink: 0 }} aria-hidden="true"></span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
+              {renamingPath === node.path ? (
+                <input autoFocus value={renameValue} onChange={e => setRenameValue(e.target.value)} onBlur={() => setRenamingPath(null)} onKeyDown={e => { if (e.key === 'Enter') commitRename(node, renameValue); if (e.key === 'Escape') setRenamingPath(null); e.stopPropagation(); }} onClick={e => e.stopPropagation()} className="tree-name-input" style={{ flex: 1, background: 'var(--bg-color)', color: 'var(--text-color)', border: '1px solid var(--accent)', padding: '2px 4px', fontSize: 'inherit', outline: 'none', marginLeft: '5px' }} />
+              ) : (
+                <>
+                  <span className="tree-name">{node.name}</span>
+                  {(() => {
+                    const stat = getGitStatusForPath(node.path, false);
+                    if (!stat) return null;
+                    const color = '#f59e0b'; // Yellow for 'M'
+                    return <span style={{ marginLeft: 'auto', marginRight: '4px', fontSize: '0.65rem', color, fontWeight: 'bold' }}>{stat}</span>;
+                  })()}
+                  <button className="tree-del" title="Delete file" onClick={(e) => deleteEntry(e, node.path, false)}>×</button>
+                </>
+              )}
+            </div>
+            {node.matches && node.matches.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                {node.matches.slice(0, 10).map((m, i) => (
+                  <div key={i} className="tree-snippet tree-file" onClick={() => {
+                     jumpToSnippetLine(node.path, m.lineNum);
+                  }} style={{ paddingLeft: '32px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    <span style={{ color: 'var(--accent)', marginRight: '4px', opacity: 0.8 }}>{m.lineNum}:</span>
+                    <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.text}</span>
+                  </div>
+                ))}
+                {node.matches.length > 10 && (
+                  <div style={{ paddingLeft: '32px', fontSize: '0.7rem', color: 'var(--text-muted)', opacity: 0.7, paddingBottom: '4px' }}>
+                    + {node.matches.length - 10} more matches
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
     ));
   };
 
+  const filterTree = (nodes: FileNode[], query: string, contentMatches: SearchResult[]): FileNode[] => {
+    if (!query) return nodes;
+    const lowerQuery = query.toLowerCase();
+    
+    // Also find any unsaved tabs that match the query
+    const dirtyTabMatches: SearchResult[] = tabs
+      .map(t => {
+        const lines = t.content.split('\n');
+        const matches: SearchSnippet[] = [];
+        lines.forEach((line, i) => {
+          if (line.toLowerCase().includes(lowerQuery)) {
+            matches.push({ lineNum: i + 1, text: line.trim() });
+          }
+        });
+        return matches.length > 0 ? { path: t.path, matches } : null;
+      })
+      .filter(Boolean) as SearchResult[];
+    
+    // Map of path to matches
+    const allMatches = new Map<string, SearchSnippet[]>();
+    for (const r of [...contentMatches, ...dirtyTabMatches]) {
+      allMatches.set(r.path, r.matches);
+    }
+
+    const walk = (ns: FileNode[]): FileNode[] => {
+      return ns.map(node => {
+        if (node.type === 'directory') {
+          const filteredChildren: FileNode[] = walk(node.children || []);
+          if (filteredChildren.length > 0 || node.name.toLowerCase().includes(lowerQuery) || allMatches.has(node.path)) {
+            return { ...node, children: filteredChildren };
+          }
+          return null;
+        }
+        
+        const isNameMatch = node.name.toLowerCase().includes(lowerQuery);
+        const fileMatches = allMatches.get(node.path);
+        
+        if (isNameMatch || fileMatches) {
+          return { ...node, matches: fileMatches || [] };
+        }
+        return null;
+      }).filter(Boolean) as FileNode[];
+    };
+    return walk(nodes);
+  };
+
   // Memoize derived views so typing doesn't re-walk the tree / re-scan headings
   // on every keystroke (they only depend on the tree and the active file).
-  const treeJsx = useMemo(() => renderTree(fileTree), [fileTree, activeTabPath]);
+  const treeJsx = useMemo(() => renderTree(filterTree(fileTree, treeSearch, searchContentResults)), [fileTree, activeTabPath, renamingPath, renameValue, selectedPaths, collapsedDirs, tabs, treeSearch, searchContentResults]);
   const outline = useMemo(() => getOutline(), [activeTab?.content]);
 
   const toggleMenu = (e: React.MouseEvent, menuName: string) => {
@@ -2208,8 +2653,14 @@ export default function App() {
     try { await fetch(`${API}/workspace/reveal`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: path || '' }) }); } catch {}
   };
   const copyToClipboard = (text: string) => navigator.clipboard.writeText(text);
-  const collapseTree = () => document.querySelectorAll('.file-tree details').forEach(d => (d as HTMLDetailsElement).open = false);
-  const expandTree = () => document.querySelectorAll('.file-tree details').forEach(d => (d as HTMLDetailsElement).open = true);
+  const collectDirPaths = (nodes: FileNode[], acc: string[] = []): string[] => {
+    for (const n of nodes) {
+      if (n.type === 'directory') { acc.push(n.path); if (n.children) collectDirPaths(n.children, acc); }
+    }
+    return acc;
+  };
+  const collapseTree = () => setCollapsedDirs(new Set(collectDirPaths(fileTree)));
+  const expandTree = () => setCollapsedDirs(new Set());
   const copyAbsolutePath = async (path: string) => {
     try {
       const res = await fetch(`${API}/workspace/root`);
@@ -2353,6 +2804,7 @@ export default function App() {
                     <div className="submenu">
                       <div className="dropdown-item" onClick={() => { setShowFigureBuilder(true); setActiveMenu(null); }}>Figure...</div>
                       <div className="dropdown-item" onClick={() => { insertImage(); setActiveMenu(null); }}>Image...</div>
+                      <div className="dropdown-item" onClick={() => { insertWhiteboard(); setActiveMenu(null); }}>Whiteboard / Sketch (Excalidraw)...</div>
                       <div className="dropdown-item" onClick={() => { insertTable(); setActiveMenu(null); }}>Table...</div>
                       <div className="dropdown-item" onClick={() => { insertDataFile(); setActiveMenu(null); }}>Import Data (CSV/JSON)...</div>
                       <div className="dropdown-item" onClick={() => { insertCodeBlock(); setActiveMenu(null); }}>Code Block <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧B</span></div>
@@ -2609,15 +3061,43 @@ export default function App() {
           <>
             <div ref={sidebarRef} className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth, maxWidth: sidebarWidth, flex: 'none', display: 'flex', flexDirection: 'column' }}>
               <div className="sidebar-section" style={{ height: treeHeight, flex: 'none', display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--border-color)' }}>
-                <div className="sidebar-header" style={{ padding: '8px 16px', background: 'var(--panel-bg)', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  FILE TREE
+                <div className="sidebar-header" style={{ padding: '6px 14px', background: 'var(--panel-bg)', fontSize: '0.68rem', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--text-muted)', opacity: 0.75, display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)' }}>
+                  File Tree
                   <span style={{ display: 'flex', gap: 10 }}>
+                    <svg className="tree-action" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ cursor: 'pointer', color: isSearchVisible ? 'var(--accent)' : 'inherit' }} onClick={() => { setIsSearchVisible(!isSearchVisible); if (isSearchVisible) setTreeSearch(''); }}><title>Search files</title><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
                     <svg className="tree-action" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ cursor: 'pointer' }} onClick={createNewFile}><title>New file</title><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="12" x2="12" y2="18"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
                     <svg className="tree-action" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ cursor: 'pointer' }} onClick={createNewFolder}><title>New folder</title><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><line x1="9" y1="14" x2="15" y2="14"></line></svg>
                     <svg className="tree-action" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ cursor: 'pointer' }} onClick={uploadAsset}><title>Upload file / image</title><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
                   </span>
                 </div>
-                <div className="file-tree" style={{ flex: 1, overflowY: 'auto' }} onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, type: 'empty' }); }}>
+                {isSearchVisible && (
+                  <div style={{ padding: '6px 10px', background: 'var(--panel-bg)', display: 'flex' }}>
+                    <input 
+                      autoFocus
+                      type="text" 
+                      placeholder="Search files..." 
+                      value={treeSearch}
+                      onChange={e => setTreeSearch(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Escape') {
+                          setIsSearchVisible(false);
+                          if (!treeSearch) setTreeSearch('');
+                        }
+                      }}
+                      style={{ 
+                        flex: 1, 
+                        padding: '4px 8px', 
+                        fontSize: '0.8rem', 
+                        background: 'var(--bg-color)', 
+                        color: 'var(--text-color)',
+                        border: '1px solid var(--border-color)',
+                        borderRadius: '4px',
+                        outline: 'none'
+                      }}
+                    />
+                  </div>
+                )}
+                <div className="file-tree" tabIndex={0} style={{ flex: 1, overflowY: 'auto', outline: 'none' }} onKeyDown={handleFileTreeKeyDown} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setContextMenu({ x: e.clientX, y: e.clientY, type: 'empty' }); }} onClick={() => { setSelectedPaths([]); setLastSelectedPath(null); }} onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDrop={e => handleDrop(e, '')}>
                   {treeJsx}
                 </div>
               </div>
@@ -2630,8 +3110,8 @@ export default function App() {
               }} />
 
               <div className="sidebar-section" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 80 }}>
-                <div className="sidebar-header" style={{ padding: '8px 16px', background: 'var(--panel-bg)', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-muted)' }}>
-                  FILE OUTLINE
+                <div className="sidebar-header" style={{ padding: '6px 14px', background: 'var(--panel-bg)', fontSize: '0.68rem', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--text-muted)', opacity: 0.75 }}>
+                  File Outline
                 </div>
                 <div className="outline-list" style={{ flex: 1, overflowY: 'auto', padding: '10px' }}>
                   {outline.length === 0 && (
@@ -2646,8 +3126,8 @@ export default function App() {
               </div>
 
               <div className="sidebar-section problems-section" style={{ flex: 'none', maxHeight: '38%', display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--border-color)' }}>
-                <div className="sidebar-header" style={{ padding: '8px 16px', background: 'var(--panel-bg)', fontSize: '0.85rem', fontWeight: 600, color: problems.some(p => p.severity === 'error') ? '#f87171' : 'var(--text-muted)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span>PROBLEMS</span>
+                <div className="sidebar-header" style={{ padding: '6px 14px', background: 'var(--panel-bg)', fontSize: '0.68rem', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', opacity: 0.85, color: problems.some(p => p.severity === 'error') ? '#f87171' : 'var(--text-muted)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>Problems</span>
                   {problems.length > 0 && <span className="problem-badge">{problems.length}</span>}
                 </div>
                 <div className="problems-list" style={{ overflowY: 'auto', padding: '6px' }}>
@@ -2668,8 +3148,8 @@ export default function App() {
                 </div>
               </div>
 
-              <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: 'var(--text-muted)' }} onClick={() => setShowAppSettings(true)}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+              <div style={{ padding: '9px 14px', borderTop: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: '7px', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.78rem' }} onClick={() => setShowAppSettings(true)}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
                 App Settings
               </div>
             </div>
@@ -2681,7 +3161,7 @@ export default function App() {
             }} />
           </>
         )}
-        <div className="editor-pane" style={{ width: editorWidth, minWidth: editorWidth, maxWidth: editorWidth, flex: 'none', display: 'flex', flexDirection: 'column' }}>
+        <div className="editor-pane" onClick={() => setIsSearchVisible(false)} style={{ width: editorWidth, minWidth: editorWidth, maxWidth: editorWidth, flex: 'none', display: 'flex', flexDirection: 'column' }}>
           <div className="tabs">
             {tabs.map(tab => (
               <div key={tab.path} className={`tab ${activeTabPath === tab.path ? 'active' : ''}`} onClick={() => setActiveTabPath(tab.path)}>
@@ -2692,69 +3172,114 @@ export default function App() {
           </div>
           <div className="editor-container" style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column' }}>
             {activeTab ? (
-              <Editor
-                height="100%"
-                language={activeTab.path.endsWith('.typ') ? 'typst' : 'plaintext'}
-                theme={theme}
-                path={activeTab.path}
-                value={activeTab.content}
-                onChange={handleEditorChange}
-                beforeMount={(monacoInstance) => setupTypstLanguage(monacoInstance)}
-                onMount={(e, monacoInstance) => {
-                  editorRef.current = e;
-                  // Overleaf-style image-path autocomplete: quick-suggest is off
-                  // inside strings, so as the user types the path in image("…")
-                  // we re-open the file suggestions on every keystroke.
-                  (e as any).onDidType(() => {
-                    const pos = e.getPosition(); const model = e.getModel();
-                    if (!pos || !model) return;
-                    const before = model.getLineContent(pos.lineNumber).slice(0, pos.column - 1);
-                    if (/\bimage\(\s*"[^"]*$/.test(before)) e.trigger('image-path', 'editor.action.triggerSuggest', {});
-                  });
-                  // Ensure our custom themes are applied on the very first paint
-                  // (otherwise the editor briefly renders in the default light theme).
-                  monacoInstance.editor.setTheme(theme);
-                  // Tinymist LSP provides hover documentation now.
-                  e.updateOptions({ hover: { enabled: true, delay: 300 } });
-                  // Redo on ⌘Y (Windows-style), in addition to Monaco's default ⌘⇧Z.
-                  e.addCommand(monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.KeyY, () => e.trigger('keyboard', 'redo', null));
-                  const m = e.getModel();
-                  if (m) { const last = m.getLineCount(); e.setPosition({ lineNumber: last, column: m.getLineMaxColumn(last) }); }
-
-                }}
-                options={{
-                  automaticLayout: true,
-                  minimap: { enabled: false },
-                  wordWrap: 'on',
-                  // Only offer our Typst completions — no generic word/HTML noise.
-                  wordBasedSuggestions: 'off',
-                  // Autocomplete behaviour, set explicitly so it never depends on
-                  // Monaco version defaults: pop as you type (incl. inside #code),
-                  // let Tab/Enter accept, and float snippets (if / for / let …) up top.
-                  quickSuggestions: { other: true, comments: false, strings: false },
-                  quickSuggestionsDelay: 10,
-                  suggestOnTriggerCharacters: true,
-                  acceptSuggestionOnEnter: 'on',
-                  tabCompletion: 'on',
-                  snippetSuggestions: 'top',
-                  suggest: { showSnippets: true, snippetsPreventQuickSuggestions: false },
-                  fontSize: editorFontSize,
-                  lineNumbers: 'on',
-                  // 2-space soft tabs so ⌘] / ⌘[ nest list items exactly one
-                  // Typst list level (indentation = depth) instead of jumping 4.
-                  tabSize: 2,
-                  insertSpaces: true,
-                  detectIndentation: false,
-                  scrollBeyondLastLine: false,
-                  smoothScrolling: true,
-                  padding: { top: 16, bottom: 16 },
-                  autoClosingBrackets: 'always',
-                  autoClosingQuotes: 'always',
-                  bracketPairColorization: { enabled: true },
-                  // Tinymist LSP provides hover documentation via the backend.
-                  hover: { enabled: true, delay: 300 },
-                }}
-              />
+              (() => {
+                const ext = (activeTabPath.split('.').pop() || '').toLowerCase();
+                // The crop/rotate editor works on a <canvas>, which rasterises to
+                // PNG — fine for raster images, but it would silently destroy a
+                // vector SVG (and SVGs often report no pixel size, breaking crop).
+                // So the editor is raster-only; SVG gets a plain preview.
+                const RASTER_EXT = ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif'];
+                const rawSrc = `${API}/workspace/raw?path=${encodeURIComponent(activeTabPath)}&v=${tabs.find(t => t.path === activeTabPath)?.content.length || 0}`;
+                if (RASTER_EXT.includes(ext)) {
+                  return (
+                    <ImageEditor
+                      path={activeTabPath}
+                      initialSrc={rawSrc}
+                      onSave={async (buf) => {
+                         await fetch(`${API}/workspace/upload?path=${encodeURIComponent(activeTabPath)}`, { method: 'POST', body: buf, headers: { 'Content-Type': 'application/octet-stream' } });
+                         // Hack to trigger a reload of the image: update the tab's "content" string length which we use as a version cache-buster
+                         setTabs(prev => prev.map(t => t.path === activeTabPath ? { ...t, content: t.content + ' ' } : t));
+                      }}
+                    />
+                  );
+                }
+                if (ext === 'svg') {
+                  return (
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--panel-bg)' }}>
+                      <div style={{ display: 'flex', gap: '10px', padding: '10px 20px', background: 'var(--bg-color)', borderBottom: '1px solid var(--border-color)', alignItems: 'center' }}>
+                        <div style={{ fontWeight: 600, color: 'var(--text-color)' }}>{activeTabPath}</div>
+                        <div style={{ flex: 1 }}></div>
+                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', background: 'var(--panel-bg)', padding: '3px 8px', borderRadius: '5px', border: '1px solid var(--border-color)' }}>Vector image · preview only</span>
+                      </div>
+                      <div style={{ flex: 1, overflow: 'auto', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+                        <img src={rawSrc} style={{ maxWidth: '80vw', maxHeight: 'calc(100vh - 160px)', objectFit: 'contain' }} alt={activeTabPath} />
+                      </div>
+                      <div style={{ padding: '10px 20px', color: 'var(--text-muted)', fontSize: '0.85rem', textAlign: 'center' }}>
+                        Cropping and rotating are available for raster images (PNG / JPG) only — SVGs are vector graphics.
+                      </div>
+                    </div>
+                  );
+                }
+                if (ext === 'excalidraw') {
+                  return (
+                    <ExcalidrawEditor
+                      path={activeTabPath}
+                      initialContent={activeTab.content}
+                      onSave={async (jsonContent, svgBlob) => {
+                        // Save the .excalidraw file
+                        await fetch(`${API}/workspace/file?path=${encodeURIComponent(activeTabPath)}`, { method: 'POST', body: jsonContent });
+                        setTabs(prev => prev.map(t => t.path === activeTabPath ? { ...t, content: jsonContent, isDirty: false } : t));
+                        
+                        // Automatically save the .svg file next to it for embedding in Typst!
+                        const svgPath = activeTabPath.replace(/\.excalidraw$/, '.svg');
+                        await fetch(`${API}/workspace/upload?path=${encodeURIComponent(svgPath)}`, { method: 'POST', body: svgBlob, headers: { 'Content-Type': 'application/octet-stream' } });
+                        fetchTree(); // Refresh tree so the SVG appears
+                      }}
+                    />
+                  );
+                }
+                return (
+                  <Editor
+                    height="100%"
+                    language={activeTab.path.endsWith('.typ') ? 'typst' : 'plaintext'}
+                    theme={theme}
+                    path={activeTab.path}
+                    value={activeTab.content}
+                    onChange={handleEditorChange}
+                    beforeMount={(monacoInstance) => setupTypstLanguage(monacoInstance)}
+                    onMount={(e, monacoInstance) => {
+                      (window as any).logTiming('Monaco ready');
+                      editorRef.current = e;
+                      (e as any).onDidType(() => {
+                        const pos = e.getPosition(); const model = e.getModel();
+                        if (!pos || !model) return;
+                        const before = model.getLineContent(pos.lineNumber).slice(0, pos.column - 1);
+                        if (/\bimage\(\s*"[^"]*$/.test(before)) e.trigger('image-path', 'editor.action.triggerSuggest', {});
+                      });
+                      monacoInstance.editor.setTheme(theme);
+                      e.updateOptions({ hover: { enabled: true, delay: 300 } });
+                      e.addCommand(monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.KeyY, () => e.trigger('keyboard', 'redo', null));
+                      const m = e.getModel();
+                      if (m) { const last = m.getLineCount(); e.setPosition({ lineNumber: last, column: m.getLineMaxColumn(last) }); }
+                    }}
+                    options={{
+                      automaticLayout: true,
+                      minimap: { enabled: false },
+                      wordWrap: 'on',
+                      wordBasedSuggestions: 'off',
+                      quickSuggestions: { other: true, comments: false, strings: false },
+                      quickSuggestionsDelay: 10,
+                      suggestOnTriggerCharacters: true,
+                      acceptSuggestionOnEnter: 'on',
+                      tabCompletion: 'on',
+                      snippetSuggestions: 'top',
+                      suggest: { showSnippets: true, snippetsPreventQuickSuggestions: false },
+                      fontSize: editorFontSize,
+                      lineNumbers: 'on',
+                      tabSize: 2,
+                      insertSpaces: true,
+                      detectIndentation: false,
+                      scrollBeyondLastLine: false,
+                      smoothScrolling: true,
+                      padding: { top: 16, bottom: 16 },
+                      autoClosingBrackets: 'always',
+                      autoClosingQuotes: 'always',
+                      bracketPairColorization: { enabled: true },
+                      hover: { enabled: true, delay: 300 },
+                    }}
+                  />
+                );
+              })()
             ) : (
               <div className="empty-state">No file selected</div>
             )}
@@ -2896,53 +3421,77 @@ export default function App() {
 
       {contextMenu && (
         <div className="context-menu dropdown" style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, zIndex: 9999, display: 'block' }} onClick={e => e.stopPropagation()}>
-          {contextMenu.type === 'file' && contextMenu.node && (
-            <>
-              <div className="dropdown-item" onClick={() => { openFile(contextMenu.node!.path); setContextMenu(null); }}>Open</div>
-              <div className="dropdown-divider"></div>
-              <div className="dropdown-item" onClick={() => { const dir = contextMenu.node!.path.includes('/') ? contextMenu.node!.path.substring(0, contextMenu.node!.path.lastIndexOf('/')) : ''; createNewFile(dir); setContextMenu(null); }}>New File...</div>
-              <div className="dropdown-item" onClick={() => { const dir = contextMenu.node!.path.includes('/') ? contextMenu.node!.path.substring(0, contextMenu.node!.path.lastIndexOf('/')) : ''; createNewFolder(dir); setContextMenu(null); }}>New Folder...</div>
-              <div className="dropdown-divider"></div>
-              <div className="dropdown-item" onClick={() => { handleRename(contextMenu.node!); setContextMenu(null); }}>Rename</div>
-              <div className="dropdown-item" onClick={() => { handleDuplicate(contextMenu.node!); setContextMenu(null); }}>Duplicate</div>
-              <div className="dropdown-divider"></div>
-              <div className="dropdown-item" onClick={() => { setFileClipboard({ path: contextMenu.node!.path, type: 'copy' }); setContextMenu(null); }}>Copy</div>
-              <div className="dropdown-item" onClick={() => { setFileClipboard({ path: contextMenu.node!.path, type: 'cut' }); setContextMenu(null); }}>Cut</div>
-              <div className="dropdown-item" style={{ opacity: fileClipboard ? 1 : 0.5, pointerEvents: fileClipboard ? 'auto' : 'none' }} onClick={() => { handlePaste(contextMenu.node!); setContextMenu(null); }}>Paste</div>
-              <div className="dropdown-divider"></div>
-              <div className="dropdown-item" style={{ color: '#ef4444' }} onClick={(e) => { deleteEntry(e, contextMenu.node!.path, false); setContextMenu(null); }}>Delete</div>
-              <div className="dropdown-divider"></div>
-              <div className="dropdown-item" onClick={() => { revealInFileManager(contextMenu.node!.path); setContextMenu(null); }}>Reveal in File Manager</div>
-              <div className="dropdown-item" onClick={() => { copyToClipboard(contextMenu.node!.path); setContextMenu(null); }}>Copy Relative Path</div>
-              <div className="dropdown-item" onClick={() => { copyAbsolutePath(contextMenu.node!.path); setContextMenu(null); }}>Copy Absolute Path</div>
-            </>
-          )}
-          {contextMenu.type === 'folder' && contextMenu.node && (
-            <>
-              <div className="dropdown-item" onClick={() => { createNewFile(contextMenu.node!.path); setContextMenu(null); }}>New File...</div>
-              <div className="dropdown-item" onClick={() => { createNewFolder(contextMenu.node!.path); setContextMenu(null); }}>New Folder...</div>
-              <div className="dropdown-divider"></div>
-              <div className="dropdown-item" style={{ opacity: fileClipboard ? 1 : 0.5, pointerEvents: fileClipboard ? 'auto' : 'none' }} onClick={() => { handlePaste(contextMenu.node!); setContextMenu(null); }}>Paste</div>
-              <div className="dropdown-divider"></div>
-              <div className="dropdown-item" onClick={() => { handleRename(contextMenu.node!); setContextMenu(null); }}>Rename</div>
-              <div className="dropdown-item" style={{ color: '#ef4444' }} onClick={(e) => { deleteEntry(e, contextMenu.node!.path, true); setContextMenu(null); }}>Delete</div>
-              <div className="dropdown-divider"></div>
-              <div className="dropdown-item" onClick={() => { copyToClipboard(contextMenu.node!.path); setContextMenu(null); }}>Copy Path</div>
-              <div className="dropdown-item" onClick={() => { revealInFileManager(contextMenu.node!.path); setContextMenu(null); }}>Reveal in File Manager</div>
-              <div className="dropdown-divider"></div>
-              <div className="dropdown-item" onClick={() => { collapseTree(); setContextMenu(null); }}>Collapse</div>
-              <div className="dropdown-item" onClick={() => { expandTree(); setContextMenu(null); }}>Expand All</div>
-            </>
-          )}
-          {contextMenu.type === 'empty' && (
+          {contextMenu.type === 'empty' ? (
             <>
               <div className="dropdown-item" onClick={() => { createNewFile(''); setContextMenu(null); }}>New File...</div>
               <div className="dropdown-item" onClick={() => { createNewFolder(''); setContextMenu(null); }}>New Folder...</div>
               <div className="dropdown-divider"></div>
-              <div className="dropdown-item" style={{ opacity: fileClipboard ? 1 : 0.5, pointerEvents: fileClipboard ? 'auto' : 'none' }} onClick={() => { handlePaste(); setContextMenu(null); }}>Paste</div>
+              <div className="dropdown-item" onClick={async () => {
+                if (!fileClipboard) return;
+                await fetch(`${API}/workspace/${fileClipboard.type === 'cut' ? 'rename' : 'copy'}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: fileClipboard.path, to: fileClipboard.path.split('/').pop() }) });
+                fetchTree(); setContextMenu(null);
+              }}>Paste</div>
               <div className="dropdown-divider"></div>
               <div className="dropdown-item" onClick={() => { fetchTree(); setContextMenu(null); }}>Refresh</div>
-              <div className="dropdown-item" onClick={() => { revealInFileManager(''); setContextMenu(null); }}>Reveal Workspace</div>
+              <div className="dropdown-item" onClick={() => { revealInFileManager(); setContextMenu(null); }}>Reveal Workspace</div>
+            </>
+          ) : (
+            <>
+              {selectedPaths.length === 1 && (() => {
+                if (contextMenu.node!.type !== 'file') return null;
+                const ext = (contextMenu.node!.path.split('.').pop() || '').toLowerCase();
+                const isImg = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp'].includes(ext);
+                if (isImg) {
+                  return (
+                    <div className="dropdown-item" onClick={() => { 
+                      insertCode(`\n#figure(\n  image("${contextMenu.node!.path}", width: 80%),\n  caption: [],\n)\n`); 
+                      setContextMenu(null); 
+                    }}>Insert Image into Document</div>
+                  );
+                }
+                return null;
+              })()}
+              {selectedPaths.length === 1 && <div className="dropdown-item" onClick={() => { if (contextMenu.node!.type === 'file') openFile(contextMenu.node!.path); setContextMenu(null); }}>Open</div>}
+              {selectedPaths.length === 1 && <div className="dropdown-divider"></div>}
+              {selectedPaths.length === 1 && <div className="dropdown-item" onClick={() => { const dir = contextMenu.node!.type === 'directory' ? contextMenu.node!.path : (contextMenu.node!.path.includes('/') ? contextMenu.node!.path.substring(0, contextMenu.node!.path.lastIndexOf('/')) : ''); createNewFile(dir); setContextMenu(null); }}>New File...</div>}
+              {selectedPaths.length === 1 && <div className="dropdown-item" onClick={() => { const dir = contextMenu.node!.type === 'directory' ? contextMenu.node!.path : (contextMenu.node!.path.includes('/') ? contextMenu.node!.path.substring(0, contextMenu.node!.path.lastIndexOf('/')) : ''); createNewFolder(dir); setContextMenu(null); }}>New Folder...</div>}
+              {selectedPaths.length === 1 && <div className="dropdown-divider"></div>}
+              <div className="dropdown-item" onClick={() => { handleRename(contextMenu.node!); setContextMenu(null); }}>Rename {selectedPaths.length > 1 ? `(${selectedPaths.length})` : ''}</div>
+              <div className="dropdown-item" onClick={() => { handleDuplicate(contextMenu.node!); setContextMenu(null); }}>Duplicate {selectedPaths.length > 1 ? `(${selectedPaths.length})` : ''}</div>
+              <div className="dropdown-divider"></div>
+              <div className="dropdown-item" onClick={() => { setFileClipboard({ path: selectedPaths[0], type: 'copy' }); setContextMenu(null); }}>Copy</div>
+              <div className="dropdown-item" onClick={() => { setFileClipboard({ path: selectedPaths[0], type: 'cut' }); setContextMenu(null); }}>Cut</div>
+              <div className="dropdown-item" onClick={async () => {
+                if (!fileClipboard) return;
+                const dir = contextMenu.node!.type === 'directory' ? contextMenu.node!.path : (contextMenu.node!.path.includes('/') ? contextMenu.node!.path.substring(0, contextMenu.node!.path.lastIndexOf('/')) : '');
+                const toPath = dir ? `${dir}/${fileClipboard.path.split('/').pop()}` : fileClipboard.path.split('/').pop();
+                await fetch(`${API}/workspace/${fileClipboard.type === 'cut' ? 'rename' : 'copy'}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: fileClipboard.path, to: toPath }) });
+                fetchTree(); setContextMenu(null);
+              }}>Paste</div>
+              <div className="dropdown-divider"></div>
+              <div className="dropdown-item" onClick={async () => {
+                const name = prompt('Archive name:', 'archive.zip');
+                if (!name) return;
+                await fetch(`${API}/workspace/compress`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paths: selectedPaths, archiveName: name }) });
+                fetchTree(); setContextMenu(null);
+              }}>Compress {selectedPaths.length > 1 ? `(${selectedPaths.length})` : ''}</div>
+              <div className="dropdown-divider"></div>
+              <div className="dropdown-item" style={{ color: '#ef4444' }} onClick={async () => {
+                if (!confirm(`Delete ${selectedPaths.length} items?`)) return;
+                for (const p of selectedPaths) await fetch(`${API}/workspace/file?path=${encodeURIComponent(p)}`, { method: 'DELETE' });
+                setSelectedPaths([]); fetchTree(); setContextMenu(null);
+              }}>Delete {selectedPaths.length > 1 ? `(${selectedPaths.length})` : ''}</div>
+              <div className="dropdown-divider"></div>
+              <div className="dropdown-item" onClick={() => { revealInFileManager(contextMenu.node!.path); setContextMenu(null); }}>Reveal in File Manager</div>
+              <div className="dropdown-item" onClick={() => { copyToClipboard(contextMenu.node!.path); setContextMenu(null); }}>Copy Relative Path</div>
+              <div className="dropdown-item" onClick={() => { copyAbsolutePath(contextMenu.node!.path); setContextMenu(null); }}>Copy Absolute Path</div>
+              {contextMenu.node!.type === 'directory' && (
+                <>
+                  <div className="dropdown-divider"></div>
+                  <div className="dropdown-item" onClick={() => { collapseTree(); setContextMenu(null); }}>Collapse</div>
+                  <div className="dropdown-item" onClick={() => { expandTree(); setContextMenu(null); }}>Expand All</div>
+                </>
+              )}
             </>
           )}
         </div>

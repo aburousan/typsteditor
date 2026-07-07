@@ -363,13 +363,13 @@ body {
 .btn-share {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   background: linear-gradient(180deg, #10c88d 0%, #0ea472 100%);
   color: #fff;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  padding: 6px 13px;
-  border-radius: 8px;
-  font-size: 0.82rem;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.74rem;
   font-weight: 550;
   cursor: pointer;
   box-shadow: 0 2px 6px -1px rgba(14, 164, 114, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.18);
@@ -558,10 +558,10 @@ body {
   background: linear-gradient(180deg, #9a8bff 0%, var(--accent) 100%);
   color: #fff;
   font-weight: 600;
-  font-size: 0.82rem;
+  font-size: 0.74rem;
   letter-spacing: 0.01em;
-  padding: 6px 16px;
-  height: 30px;
+  padding: 4px 11px;
+  height: 26px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 2px 6px -1px rgba(139, 124, 246, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.15);
 }
@@ -1183,8 +1183,7 @@ iframe.pdf-viewer {
 }
 
 .tree-file.active {
-  background: rgba(139, 92, 246, 0.18);
-  color: #fff;
+  color: var(--accent);
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
@@ -1262,3 +1261,32 @@ details > summary::-webkit-details-marker {
   color: var(--text-muted);
   font-style: italic;
 }
+
+.tree-file.selected, .tree-dir.selected {
+  background: rgba(167, 139, 250, 0.15);
+  color: var(--accent);
+}
+
+
+.tree-file, .tree-dir, .tree-name {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: element;
+}
+
+
+.tree-dir-container .tree-children {
+  display: none;
+}
+.tree-dir-container.open > .tree-children {
+  display: block;
+}
+
+/* Chevron points right when collapsed, rotates down when the folder is open. */
+.tree-chevron {
+  color: var(--text-muted);
+}
+.tree-dir-container.open > .tree-dir .tree-chevron {
+  transform: rotate(90deg);
+}
+
