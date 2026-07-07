@@ -1511,6 +1511,58 @@ export default function App() {
     ));
   };
 
+  // Visual page setup → generates a `#set page(...)` rule (paper size, per-side
+  // margins, header/footer, page numbers) and drops it at the top of the file,
+  // where page setup belongs.
+  const insertPageSetup = () => setInputModal({
+    title: 'Page Setup',
+    submitLabel: 'Apply',
+    fields: [
+      { key: 'paper', label: 'Paper size', type: 'select', default: 'a4', options: ['a4', 'a5', 'a3', 'a6', 'us-letter', 'us-legal', 'iso-b5', 'presentation-16-9', 'custom'] },
+      { key: 'width', label: 'Custom width', placeholder: '21cm', hint: 'Only used when paper = custom' },
+      { key: 'height', label: 'Custom height', placeholder: '29.7cm', hint: 'Only used when paper = custom' },
+      { key: 'mtop', label: 'Top margin', placeholder: 'e.g. 2.5cm', hint: 'Leave any margin blank to keep the default' },
+      { key: 'mbottom', label: 'Bottom margin', placeholder: 'e.g. 2.5cm' },
+      { key: 'mleft', label: 'Left margin', placeholder: 'e.g. 2cm' },
+      { key: 'mright', label: 'Right margin', placeholder: 'e.g. 2cm' },
+      { key: 'header', label: 'Header text', placeholder: 'optional' },
+      { key: 'footer', label: 'Footer text', placeholder: 'optional' },
+      { key: 'pagenum', label: 'Page numbers', type: 'select', default: 'none', options: ['none', 'bottom center', 'bottom right', 'bottom left', 'top center', 'top right'] },
+    ],
+    onSubmit: (v) => {
+      const esc = (s: string) => s.replace(/([\[\]#])/g, '\\$1');
+      const lines: string[] = [];
+      if (v.paper === 'custom' && (v.width || v.height)) {
+        if (v.width) lines.push(`  width: ${v.width},`);
+        if (v.height) lines.push(`  height: ${v.height},`);
+      } else {
+        lines.push(`  paper: "${v.paper}",`);
+      }
+      const m: string[] = [];
+      if (v.mtop?.trim()) m.push(`top: ${v.mtop.trim()}`);
+      if (v.mbottom?.trim()) m.push(`bottom: ${v.mbottom.trim()}`);
+      if (v.mleft?.trim()) m.push(`left: ${v.mleft.trim()}`);
+      if (v.mright?.trim()) m.push(`right: ${v.mright.trim()}`);
+      if (m.length) lines.push(`  margin: (${m.join(', ')}),`);
+      if (v.header?.trim()) lines.push(`  header: [${esc(v.header.trim())}],`);
+      const pn = v.pagenum;
+      if (pn && pn !== 'none') {
+        const horiz = pn.includes('right') ? 'right' : pn.includes('left') ? 'left' : 'center';
+        const vert = pn.startsWith('top') ? 'top' : 'bottom';
+        if (v.footer?.trim()) {
+          // Combine footer text with the page number so they don't clash.
+          lines.push(`  footer: [${esc(v.footer.trim())} #h(1fr) #context counter(page).display()],`);
+        } else {
+          lines.push(`  numbering: "1",`);
+          lines.push(`  number-align: ${vert} + ${horiz},`);
+        }
+      } else if (v.footer?.trim()) {
+        lines.push(`  footer: [${esc(v.footer.trim())}],`);
+      }
+      insertAtTop(`#set page(\n${lines.join('\n')}\n)\n\n`);
+    },
+  });
+
   const insertTitleBlock = () => setInputModal({
     title: 'Insert Title Block',
     fields: [
@@ -2936,6 +2988,7 @@ export default function App() {
                   <div className="dropdown-item" onClick={() => { insertHighlight(); setActiveMenu(null); }}>Highlight / Background Colour...</div>
                   <div className="dropdown-item" onClick={() => { insertCancel(); setActiveMenu(null); }}>Cross Out / Strike Through...</div>
                   <div className="dropdown-header">Layout</div>
+                  <div className="dropdown-item" onClick={() => { insertPageSetup(); setActiveMenu(null); }}>Page Setup (size, margins, header/footer)...</div>
                   <div className="dropdown-item" onClick={() => { insertBox(); setActiveMenu(null); }}>Box Selection (fill, border, texture)...</div>
                   <div className="dropdown-item" onClick={() => { setSelectionFontSizePrompt(); setActiveMenu(null); }}>Font Size...</div>
                   <div className="dropdown-item" onClick={() => { insertAlign(); setActiveMenu(null); }}>Align Content...</div>
