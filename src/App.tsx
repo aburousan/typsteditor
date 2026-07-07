@@ -19,6 +19,7 @@ import SaveAsModal from './components/SaveAsModal';
 import PdfPreview from './components/PdfPreview';
 // Loaded on demand: pulls in all of three.js, which nothing else needs.
 const Plot3DStudio = lazy(() => import('./components/Plot3DStudio'));
+const PlotStudio = lazy(() => import('./components/PlotStudio'));
 const FeynmanBuilder = lazy(() => import('./components/FeynmanBuilder'));
 const EquationGallery = lazy(() => import('./components/EquationGallery'));
 import type { EqTemplate } from './components/EquationGallery';
@@ -26,6 +27,7 @@ const FlowchartCoder = lazy(() => import('./components/FlowchartCoder'));
 const MatrixStudio = lazy(() => import('./components/MatrixStudio'));
 const ImagePlacer = lazy(() => import('./components/ImagePlacer'));
 import SymbolDraw from './components/SymbolDraw';
+import Boundary from './components/Boundary';
 import RefManager from './components/RefManager';
 import BibManager from './components/BibManager';
 import './index.css';
@@ -340,6 +342,7 @@ export default function App() {
   const [codeRunner, setCodeRunner] = useState<null | { initialLang?: 'python' | 'julia' | 'wolfram'; initialCode?: string; initialMode?: 'text' | 'equation' }>(null);
   const [showSaveAs, setShowSaveAs] = useState(false);
   const [showPlot3D, setShowPlot3D] = useState(false);
+  const [showPlotStudio, setShowPlotStudio] = useState(false);
   const [showSymbolDraw, setShowSymbolDraw] = useState(false);
 
   const [showRefManager, setShowRefManager] = useState(false);
@@ -2027,39 +2030,6 @@ export default function App() {
     });
   };
 
-  const insertCetz3D = () => setInputModal({
-    title: 'Insert 3D Surface (cetz)',
-    fields: [
-      { key: 'expr', label: 'z = f(x, y)  (Typst calc syntax)', default: 'calc.sin(calc.sqrt(x*x + y*y))' },
-      { key: 'range', label: 'Range (± value on x and y)', default: '4' },
-      { key: 'caption', label: 'Figure caption', default: '3D surface' },
-      { key: 'label', label: 'Label (optional)', placeholder: 'surf1 → @fig:surf1' },
-    ],
-    onSubmit: (v) => {
-      const R = Math.abs(parseFloat(v.range)) || 4;
-      const s = (2 * R / 16).toFixed(3);
-      const canvas = `canvas({
-    import draw: *
-    rotate(x: 70deg, z: 30deg)
-    let f(x, y) = ${v.expr}
-    let n = 16
-    let s = ${s}
-    for i in range(n) {
-      for j in range(n) {
-        let x = (i - n/2)*s
-        let y = (j - n/2)*s
-        let x2 = (i + 1 - n/2)*s
-        let y2 = (j + 1 - n/2)*s
-        if i < n - 1 { line((x, y, f(x, y)), (x2, y, f(x2, y)), stroke: blue.darken(10%)) }
-        if j < n - 1 { line((x, y, f(x, y)), (x, y2, f(x, y2)), stroke: blue.darken(10%)) }
-      }
-    }
-  })`;
-      const imp = '#import "@preview/cetz:0.3.4": canvas, draw\n';
-      const tag = v.label ? ` <fig:${v.label}>` : '';
-      insertCode(`\n${imp}#figure(\n  ${canvas},\n  caption: [${v.caption}],\n)${tag}\n\n`);
-    }
-  });
 
   // Insert a commutative diagram drawn in quiver: add the fletcher import once,
   // then drop in the exported diagram code (stripping quiver's permalink comment).
@@ -2937,12 +2907,9 @@ export default function App() {
                   <div className="dropdown-item has-submenu">
                     <span>Plots</span><span className="submenu-arrow">›</span>
                     <div className="submenu">
-                      <div className="dropdown-header">2D</div>
-                      <div className="dropdown-item" onClick={() => { setShowDiagramBuilder(true); setActiveMenu(null); }}>Diagram / Plot (2D, cetz)...</div>
-                      <div className="dropdown-header">3D</div>
-                      <div className="dropdown-item" onClick={() => { insertCetz3D(); setActiveMenu(null); }}>3D Surface (cetz)...</div>
-                      <div className="dropdown-item" onClick={() => { setCodeRunner({ initialLang: 'python', initialCode: SURFACE_3D_TEMPLATE }); setActiveMenu(null); }}>3D Surface (Python/matplotlib)...</div>
-                      <div className="dropdown-item" onClick={() => { setShowPlot3D(true); setActiveMenu(null); }}>3D Plot Studio (rotate &amp; pick view)...</div>
+                      <div className="dropdown-header">Plots</div>
+                      <div className="dropdown-item" onClick={() => { setShowPlotStudio(true); setActiveMenu(null); }}>Plot Studio (2D · data · 3D · Python)...</div>
+                      <div className="dropdown-item" onClick={() => { setShowDiagramBuilder(true); setActiveMenu(null); }}>cetz Canvas (shapes &amp; grid)...</div>
                       <div className="dropdown-header">Diagrams</div>
                       <div className="dropdown-item" onClick={() => { setShowQuiver(true); setActiveMenu(null); }}>Commutative Diagram (quiver)...</div>
                       <div className="dropdown-item" onClick={() => { setShowFeynman(true); setActiveMenu(null); }}>Feynman Diagram (visual)... <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧F</span></div>
@@ -3336,6 +3303,7 @@ export default function App() {
                 }
                 if (ext === 'excalidraw') {
                   return (
+                    <Boundary name="Whiteboard" onClose={() => { const rem = tabs.filter(t => t.path !== activeTabPath); setTabs(rem); setActiveTabPath(rem.length ? rem[rem.length - 1].path : ''); }}>
                     <ExcalidrawEditor
                       path={activeTabPath}
                       initialContent={activeTab.content}
@@ -3343,13 +3311,14 @@ export default function App() {
                         // Save the .excalidraw file
                         await fetch(`${API}/workspace/file?path=${encodeURIComponent(activeTabPath)}`, { method: 'POST', body: jsonContent });
                         setTabs(prev => prev.map(t => t.path === activeTabPath ? { ...t, content: jsonContent, isDirty: false } : t));
-                        
+
                         // Automatically save the .svg file next to it for embedding in Typst!
                         const svgPath = activeTabPath.replace(/\.excalidraw$/, '.svg');
                         await fetch(`${API}/workspace/upload?path=${encodeURIComponent(svgPath)}`, { method: 'POST', body: svgBlob, headers: { 'Content-Type': 'application/octet-stream' } });
                         fetchTree(); // Refresh tree so the SVG appears
                       }}
                     />
+                    </Boundary>
                   );
                 }
                 return (
@@ -3519,9 +3488,10 @@ export default function App() {
         compileDelay={compileDelay} onCompileDelay={setCompileDelay} />}
       {showQuiver && <QuiverDiagram onClose={() => setShowQuiver(false)} onInsert={insertQuiverDiagram} />}
       {inputModal && <InputModal {...inputModal} onClose={() => setInputModal(null)} />}
-      {codeRunner && <CodeRunnerModal {...codeRunner} onClose={() => setCodeRunner(null)} onInsert={(code) => { insertCode(code); setCodeRunner(null); }} onInsertEquation={(latex, codeBlock) => { insertEquationFromLatex(latex, codeBlock); setCodeRunner(null); }} onChanged={fetchTree} />}
+      {codeRunner && <Boundary name="Code Runner" onClose={() => setCodeRunner(null)}><CodeRunnerModal {...codeRunner} onClose={() => setCodeRunner(null)} onInsert={(code) => { insertCode(code); setCodeRunner(null); }} onInsertEquation={(latex, codeBlock) => { insertEquationFromLatex(latex, codeBlock); setCodeRunner(null); }} onChanged={fetchTree} /></Boundary>}
       {showSaveAs && activeTab && <SaveAsModal onClose={() => setShowSaveAs(false)} fileName={activeTabPath} content={activeTab.content} pdfUrl={pdfUrl} projectName={projectName} mainFile={currentMain} />}
-      {showPlot3D && <Suspense fallback={null}><Plot3DStudio onClose={() => setShowPlot3D(false)} onInsert={(code) => { insertCode(code); setShowPlot3D(false); fetchTree(); }} /></Suspense>}
+      {showPlot3D && <Boundary name="3D Plot Studio" onClose={() => setShowPlot3D(false)}><Suspense fallback={null}><Plot3DStudio onClose={() => setShowPlot3D(false)} onInsert={(code) => { insertCode(code); setShowPlot3D(false); fetchTree(); }} /></Suspense></Boundary>}
+      {showPlotStudio && <Boundary name="Plot Studio" onClose={() => setShowPlotStudio(false)}><Suspense fallback={null}><PlotStudio onClose={() => setShowPlotStudio(false)} onInsert={(code) => insertCode(code)} onOpenInteractive={() => setShowPlot3D(true)} onOpenPython={() => setCodeRunner({ initialLang: 'python', initialCode: SURFACE_3D_TEMPLATE })} /></Suspense></Boundary>}
       {showSymbolDraw && <SymbolDraw onClose={() => setShowSymbolDraw(false)} onInsert={(name) => { insertCode(name + ' '); setShowSymbolDraw(false); }} />}
       {showRefManager && activeTab && <RefManager content={activeTab.content} onClose={() => setShowRefManager(false)} onJump={jumpToLine} onInsertRef={(name) => insertCode(`@${name}`)} />}
       {showBibManager && <BibManager onClose={() => setShowBibManager(false)} onCite={(key) => { insertCode(`@${key}`); ensureBibliography(); }} onEnsureBib={ensureBibliography} onChanged={fetchTree} />}

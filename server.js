@@ -136,6 +136,9 @@ app.get('/workspace/search', (req, res) => {
       } else {
         const ext = (item.split('.').pop() || '').toLowerCase();
         if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'zip', 'tar', 'gz'].includes(ext)) continue;
+        // Skip very large files — reading a huge data file into memory would stall
+        // search and spike RAM. Source/text files that matter are far smaller.
+        if (stat.size > 2 * 1024 * 1024) continue;
         try {
           const content = readFileSync(full, 'utf-8');
           if (content.toLowerCase().includes(q)) {

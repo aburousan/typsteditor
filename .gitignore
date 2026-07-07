@@ -37,3 +37,4 @@ release/
 workspace/*.pdf
 workspace/images/
 bin/tinymist
+*.key
