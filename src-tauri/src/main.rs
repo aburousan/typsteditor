@@ -177,7 +177,8 @@ fn headless_main() {
         let preferred: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3001);
         let (listener, port) = bind_free_port(preferred);
         let state = Arc::new(server::AppState::new(ws, dist));
-        std::thread::spawn(proofread::warm); // pre-load spell/grammar dictionaries
+        // The spell/grammar dictionaries cost ~150 MB resident and proofreading is
+        // off by default, so they load on the first /lint call instead of at boot.
         println!("Typst compiler server running on http://127.0.0.1:{port}");
         println!("  code execution: {}", if state.allow_exec { "ENABLED (sandbox/)" } else { "disabled" });
         server::serve(listener, state).await;
@@ -268,7 +269,7 @@ fn main() {
             let state = Arc::new(server::AppState::new(ws, dist));
             *state.app.lock().unwrap() = Some(app.handle().clone());
             tauri::async_runtime::spawn(server::serve(listener, state));
-            std::thread::spawn(proofread::warm); // pre-load spell/grammar dictionaries
+            // Dictionaries load on the first /lint call; see the note in headless_main.
 
             let url: tauri::Url = format!("http://127.0.0.1:{port}").parse().unwrap();
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(url))

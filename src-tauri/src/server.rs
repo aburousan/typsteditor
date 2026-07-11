@@ -52,13 +52,21 @@ impl Interpreters {
     }
 }
 
+// A universe package with its searchable text lowercased once at index time,
+// so a search request doesn't re-allocate a haystack per package per keystroke.
+pub struct Pkg {
+    pub value: Value,
+    pub name_lc: String,
+    pub hay: String,
+}
+
 pub struct AppState {
     pub workspace: RwLock<PathBuf>,
     pub dist: Option<PathBuf>,
     pub interpreters: Interpreters,
     pub allow_exec: bool,
     pub exec_timeout_ms: u64,
-    pub universe: tokio::sync::Mutex<Option<(Instant, Arc<Vec<Value>>)>>,
+    pub universe: tokio::sync::Mutex<Option<(Instant, Arc<Vec<Pkg>>)>>,
     pub http: reqwest::Client,
     pub app: Mutex<Option<tauri::AppHandle>>,
 }
@@ -148,11 +156,92 @@ struct CmdOut {
 }
 
 // Run a command, capture output, kill it after `timeout_ms` (if given).
+// When the app runs from a Linux AppImage, the AppRun launcher exports
+// PYTHONHOME / PYTHONPATH / LD_LIBRARY_PATH pointing inside the mounted image
+// (e.g. /tmp/.mount_XXXX/usr). Those leak into any tool we spawn: the user's
+// system python3 then hunts for its standard library inside the image and dies
+// with "No module named 'encodings'". When we detect the image, drop the
+// injected values so spawned interpreters use their own environment. Parts of
+// LD_LIBRARY_PATH that don't belong to the image are preserved.
+#[cfg(target_os = "linux")]
+fn strip_appimage_env(cmd: &mut Command) {
+    if std::env::var("APPIMAGE").is_err() && std::env::var("APPDIR").is_err() {
+        return; // not launched from an AppImage
+    }
+    let appdir = std::env::var("APPDIR").ok().filter(|d| !d.is_empty());
+    let looks_injected = |v: &str| {
+        v.contains("/.mount_") || appdir.as_deref().map_or(false, |d| v.contains(d))
+    };
+    for key in ["PYTHONHOME", "PYTHONPATH"] {
+        if std::env::var(key).map(|v| looks_injected(&v)).unwrap_or(false) {
+            cmd.env_remove(key);
+        }
+    }
+    if let Ok(v) = std::env::var("LD_LIBRARY_PATH") {
+        let kept: Vec<&str> = v.split(':').filter(|s| !s.is_empty() && !looks_injected(s)).collect();
+        if kept.is_empty() {
+            cmd.env_remove("LD_LIBRARY_PATH");
+        } else {
+            cmd.env("LD_LIBRARY_PATH", kept.join(":"));
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn strip_appimage_env(_cmd: &mut Command) {}
+
+// Cap on captured stdout/stderr. A runaway `while True: print(...)` can emit
+// gigabytes long before the wall-clock timeout fires; without a cap the backend
+// buffers all of it and can OOM. We keep draining the pipe (so a benign, slightly
+// chatty program still exits cleanly) but stop storing past the cap.
+const MAX_CAPTURE: usize = 8 * 1024 * 1024;
+
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> (Vec<u8>, bool) {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut truncated = false;
+    loop {
+        match r.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if out.len() < MAX_CAPTURE {
+                    let take = n.min(MAX_CAPTURE - out.len());
+                    out.extend_from_slice(&buf[..take]);
+                    if out.len() >= MAX_CAPTURE { truncated = true; }
+                }
+            }
+        }
+    }
+    (out, truncated)
+}
+
 async fn run_cmd(
     program: &str,
     args: &[&str],
     cwd: Option<&Path>,
     timeout_ms: Option<u64>,
+) -> std::io::Result<CmdOut> {
+    run_cmd_inner(program, args, cwd, timeout_ms, false).await
+}
+
+// Like run_cmd, but for untrusted user code: applies per-process OS resource
+// limits (max file size, CPU seconds) on top of the wall-clock timeout so a
+// runaway cell can't fill the disk or peg a core if the kill is ever missed.
+async fn run_exec_cmd(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    timeout_ms: Option<u64>,
+) -> std::io::Result<CmdOut> {
+    run_cmd_inner(program, args, cwd, timeout_ms, true).await
+}
+
+async fn run_cmd_inner(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    timeout_ms: Option<u64>,
+    sandboxed: bool,
 ) -> std::io::Result<CmdOut> {
     let mut cmd = Command::new(program);
     // Windows: don't flash a console window for each spawned tool (typst, git,
@@ -160,22 +249,38 @@ async fn run_cmd(
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    // Never let a spawned tool block on an interactive prompt. Without this a
+    // `git push` that needs a password (no TTY available) would hang the request
+    // instead of failing fast. Harmless to the other tools we run.
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    strip_appimage_env(&mut cmd);
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
+    // Defence-in-depth for code execution: hard caps enforced by the kernel on the
+    // child. RLIMIT_FSIZE stops disk-fill; RLIMIT_CPU is a generous backstop to the
+    // wall-clock timeout. Kept loose enough not to disturb normal numerical work.
+    #[cfg(unix)]
+    if sandboxed {
+        let cpu_secs = timeout_ms.map(|ms| ms / 1000 + 30).unwrap_or(180);
+        unsafe {
+            cmd.pre_exec(move || {
+                let set = |res: libc::c_int, cur: u64, max: u64| {
+                    let lim = libc::rlimit { rlim_cur: cur as libc::rlim_t, rlim_max: max as libc::rlim_t };
+                    libc::setrlimit(res, &lim);
+                };
+                set(libc::RLIMIT_FSIZE, 256 * 1024 * 1024, 256 * 1024 * 1024);
+                set(libc::RLIMIT_CPU, cpu_secs, cpu_secs + 5);
+                Ok(())
+            });
+        }
+    }
+    let _ = sandboxed; // (Windows: limits are enforced by the wall-clock timeout only.)
     let mut child = cmd.spawn()?;
-    let mut so = child.stdout.take().unwrap();
-    let mut se = child.stderr.take().unwrap();
-    let so_task = tokio::spawn(async move {
-        let mut b = Vec::new();
-        let _ = so.read_to_end(&mut b).await;
-        b
-    });
-    let se_task = tokio::spawn(async move {
-        let mut b = Vec::new();
-        let _ = se.read_to_end(&mut b).await;
-        b
-    });
+    let so = child.stdout.take().unwrap();
+    let se = child.stderr.take().unwrap();
+    let so_task = tokio::spawn(read_capped(so));
+    let se_task = tokio::spawn(read_capped(se));
     let dur = Duration::from_millis(timeout_ms.unwrap_or(u64::MAX / 1000));
     let mut killed = false;
     let code = match tokio::time::timeout(dur, child.wait()).await {
@@ -188,8 +293,13 @@ async fn run_cmd(
             None
         }
     };
-    let stdout = String::from_utf8_lossy(&so_task.await.unwrap_or_default()).into_owned();
-    let stderr = String::from_utf8_lossy(&se_task.await.unwrap_or_default()).into_owned();
+    let (so_bytes, so_trunc) = so_task.await.unwrap_or_default();
+    let (se_bytes, se_trunc) = se_task.await.unwrap_or_default();
+    let mut stdout = String::from_utf8_lossy(&so_bytes).into_owned();
+    let stderr = String::from_utf8_lossy(&se_bytes).into_owned();
+    if so_trunc || se_trunc {
+        stdout.push_str("\n[output truncated — exceeded 8 MB]");
+    }
     Ok(CmdOut { code, killed, stdout, stderr })
 }
 
@@ -350,6 +460,40 @@ async fn workspace_upload(State(st): St, Query(q): Q, body: Bytes) -> Response {
     }
 }
 
+// Convert an uploaded spreadsheet (xlsx/xls/xlsb/ods) into one CSV per sheet.
+// Typst only reads CSV natively, so Excel import goes through here — fully
+// offline, no dependency on Excel or a Python/pandas install.
+async fn data_xlsx(body: Bytes) -> Response {
+    use calamine::{open_workbook_auto_from_rs, Data, Reader};
+    let mut wb = match open_workbook_auto_from_rs(std::io::Cursor::new(body.to_vec())) {
+        Ok(w) => w,
+        Err(e) => return json_err(StatusCode::BAD_REQUEST, format!("Could not read spreadsheet: {e}")),
+    };
+    fn field(c: &Data) -> String {
+        let s = if matches!(c, Data::Empty) { String::new() } else { c.to_string() };
+        if s.contains(['"', ',', '\n', '\r']) {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s
+        }
+    }
+    let mut sheets = Vec::new();
+    for name in wb.sheet_names().to_owned() {
+        let Ok(range) = wb.worksheet_range(&name) else { continue };
+        let mut csv = String::new();
+        for row in range.rows() {
+            let cols: Vec<String> = row.iter().map(field).collect();
+            csv.push_str(&cols.join(","));
+            csv.push('\n');
+        }
+        sheets.push(json!({ "name": name, "csv": csv, "rows": range.height(), "cols": range.width() }));
+    }
+    if sheets.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "No readable sheets in that file.");
+    }
+    Json(json!({ "sheets": sheets })).into_response()
+}
+
 // Save a base64 data-URL image into the workspace (3D Plot Studio).
 async fn workspace_save_image(State(st): St, body: Bytes) -> Response {
     static DATA_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)^data:image/\w+;base64,(.+)$").unwrap());
@@ -429,12 +573,7 @@ async fn workspace_reveal(State(st): St, body: Bytes) -> Response {
     if !target.exists() {
         return json_err(StatusCode::NOT_FOUND, "Path not found");
     }
-    #[cfg(target_os = "macos")]
-    { let _ = std::process::Command::new("open").arg("-R").arg(&target).spawn(); }
-    #[cfg(target_os = "windows")]
-    { let _ = std::process::Command::new("explorer").arg(format!("/select,{}", target.display())).spawn(); }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    { let dir = if target.is_dir() { target.clone() } else { target.parent().map(Path::to_path_buf).unwrap_or_else(|| target.clone()) }; let _ = open::that_detached(dir); }
+    reveal_in_file_manager(&target);
     Json(json!({ "ok": true })).into_response()
 }
 
@@ -550,7 +689,8 @@ async fn compile(State(st): St, Query(q): Q, body: Bytes) -> Response {
     let Some(main_path) = safe_workspace_path(&ws, main_q) else {
         return json_err(StatusCode::BAD_REQUEST, "Invalid main path");
     };
-    let output_path = ws.join("out.pdf");
+    ensure_hilbert(&ws);
+    let output_path = hilbert_dir(&ws).join("out.pdf");
     let body_str = String::from_utf8_lossy(&body);
     if !body_str.trim().is_empty() {
         let _ = fs::write(&main_path, body_str.as_bytes());
@@ -653,12 +793,112 @@ async fn compile_html(State(st): St, Query(q): Q) -> Response {
 }
 
 // Export a single file (compiled PDF/HTML or Typst source) into a target folder.
+fn export_ext(format: &str) -> &'static str {
+    match format { "png" => "png", "svg" => "svg", "html" => "html", "typ" => "typ", _ => "pdf" }
+}
+
+// Build the typst CLI args for the requested format + the user's export options
+// (page range, PDF standard, tagging, pretty-print, PNG resolution).
+fn export_opts_args(v: &Value, format: &str) -> Vec<String> {
+    let mut a: Vec<String> = vec!["--format".into(), format.into()];
+    if format == "html" { a.push("--features".into()); a.push("html".into()); }
+    if let Some(p) = jstr(v, "pages").map(str::trim).filter(|s| !s.is_empty()) {
+        a.push("--pages".into()); a.push(p.to_string());
+    }
+    if format == "pdf" {
+        if let Some(s) = jstr(v, "pdfStandard").map(str::trim).filter(|s| !s.is_empty() && *s != "default") {
+            a.push("--pdf-standard".into()); a.push(s.to_string());
+        }
+        // Typst tags PDFs by default; the flag opts out.
+        if v.get("tagged").and_then(Value::as_bool) == Some(false) {
+            a.push("--no-pdf-tags".into());
+        }
+    }
+    if format == "png" {
+        let ppi = v.get("ppi").and_then(Value::as_f64).filter(|n| (16.0..=2400.0).contains(n)).unwrap_or(144.0);
+        a.push("--ppi".into()); a.push((ppi as u32).to_string());
+    }
+    if matches!(format, "pdf" | "svg" | "html") && v.get("pretty").and_then(Value::as_bool) == Some(true) {
+        a.push("--pretty".into());
+    }
+    a
+}
+
+// Run one typst export (input → output) with the option args applied.
+async fn run_typst_export(ws: &Path, main_abs: &Path, out_path: &Path, v: &Value, format: &str) -> Result<(), String> {
+    let ws_s = ws.to_string_lossy().into_owned();
+    let main_s = main_abs.to_string_lossy().into_owned();
+    let out_s = out_path.to_string_lossy().into_owned();
+    let opts = export_opts_args(v, format);
+    let mut args: Vec<&str> = vec!["compile", "--root", &ws_s];
+    for o in &opts { args.push(o); }
+    args.push(&main_s);
+    args.push(&out_s);
+    match run_cmd("typst", &args, Some(ws), None).await {
+        Ok(o) if o.code == Some(0) => Ok(()),
+        Ok(o) => Err(if o.stderr.is_empty() { "Compilation failed.".into() } else { o.stderr }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(TYPST_NOT_FOUND_SHORT.into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+// PNG/SVG can emit one file per page (via the `{p}` template). Count what was
+// produced; if only one page was written, drop the "-1" suffix for a clean name.
+fn collapse_pages(dir: &Path, stem: &str, ext: &str) -> (usize, String) {
+    let prefix = format!("{stem}-");
+    let suffix = format!(".{ext}");
+    let mut pages: Vec<PathBuf> = fs::read_dir(dir).into_iter().flatten().flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str())
+            .map(|n| n.starts_with(&prefix) && n.ends_with(&suffix)).unwrap_or(false))
+        .collect();
+    pages.sort();
+    if pages.len() == 1 {
+        let single = dir.join(format!("{stem}{suffix}"));
+        let _ = fs::rename(&pages[0], &single);
+        return (1, single.to_string_lossy().into_owned());
+    }
+    (pages.len(), pages.first().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())
+}
+
+// Export directly into a caller-supplied folder (the "save to folder" path).
+// Show a file selected in Finder / Explorer, rather than opening it.
+fn reveal_in_file_manager(target: &Path) {
+    #[cfg(target_os = "macos")]
+    { let _ = std::process::Command::new("open").arg("-R").arg(target).spawn(); }
+    #[cfg(target_os = "windows")]
+    { let _ = std::process::Command::new("explorer").arg(format!("/select,{}", target.display())).spawn(); }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir = if target.is_dir() { target.to_path_buf() } else { target.parent().map(Path::to_path_buf).unwrap_or_else(|| target.to_path_buf()) };
+        let _ = open::that_detached(dir);
+    }
+}
+
+// "Open after export". A multi-page export reveals the file instead of opening N
+// viewer windows. So does SVG: the app registered for it is often a source editor
+// (LaTeXiT, an IDE, a text editor) rather than a renderer, and handing the user a
+// wall of XML reads like the export failed. Everything else opens normally.
+fn open_exported(target: &str, count: u64) {
+    let p = Path::new(target);
+    let is_svg = p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+    if count > 1 || is_svg {
+        reveal_in_file_manager(p);
+    } else {
+        let _ = open::that_detached(p);
+    }
+}
+
+fn wants_open(v: &Value) -> bool {
+    v.get("open").and_then(Value::as_bool).unwrap_or(false)
+}
+
 async fn export(State(st): St, body: Bytes) -> Response {
     let v = parse_json(&body);
     let Some(folder) = jstr(&v, "folder").filter(|f| !f.is_empty()) else {
         return json_err(StatusCode::BAD_REQUEST, "Destination folder required.");
     };
-    let format = jstr(&v, "format").unwrap_or("");
+    let format = jstr(&v, "format").unwrap_or("pdf");
     let name = jstr(&v, "name").filter(|n| !n.is_empty()).unwrap_or("document");
     let main_file = jstr(&v, "main").filter(|m| !m.is_empty()).unwrap_or("main.typ");
     let ws = st.ws();
@@ -668,35 +908,80 @@ async fn export(State(st): St, body: Bytes) -> Response {
     if format == "typ" {
         let target = Path::new(folder).join(format!("{name}.typ"));
         return match fs::copy(ws.join(main_file), &target) {
-            Ok(_) => Json(json!({ "ok": true, "target": target.to_string_lossy() })).into_response(),
+            Ok(_) => {
+                if wants_open(&v) { open_exported(&target.to_string_lossy(), 1); }
+                Json(json!({ "ok": true, "target": target.to_string_lossy(), "count": 1 })).into_response()
+            }
             Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         };
     }
-    if format == "pdf" || format == "html" {
-        let ext = if format == "html" { "html" } else { "pdf" };
-        let target = Path::new(folder).join(format!("{name}.{ext}"));
-        let main_abs = ws.join(main_file);
-        let ws_s = ws.to_string_lossy().into_owned();
-        let mut args: Vec<&str> = vec!["compile", "--root", &ws_s, "--format", ext];
-        if format == "html" {
-            args.extend(["--features", "html"]);
+    let ext = export_ext(format);
+    let multi = matches!(format, "png" | "svg");
+    let main_abs = ws.join(main_file);
+    let out_name = if multi { format!("{name}-{{p}}.{ext}") } else { format!("{name}.{ext}") };
+    let out_path = Path::new(folder).join(out_name);
+    match run_typst_export(&ws, &main_abs, &out_path, &v, format).await {
+        Ok(()) => {
+            let (count, first) = if multi { collapse_pages(Path::new(folder), name, ext) }
+                else { (1, out_path.to_string_lossy().into_owned()) };
+            if wants_open(&v) { open_exported(&first, count as u64); }
+            Json(json!({ "ok": true, "target": first, "count": count })).into_response()
         }
-        let main_s = main_abs.to_string_lossy().into_owned();
-        let target_s = target.to_string_lossy().into_owned();
-        args.push(&main_s);
-        args.push(&target_s);
-        let out = match run_cmd("typst", &args, Some(&ws), None).await {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return json_err(StatusCode::INTERNAL_SERVER_ERROR, TYPST_NOT_FOUND_SHORT),
-            Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        };
-        return if out.code == Some(0) {
-            Json(json!({ "ok": true, "target": target.to_string_lossy() })).into_response()
-        } else {
-            json_err(StatusCode::BAD_REQUEST, if out.stderr.is_empty() { "Compilation failed.".into() } else { out.stderr })
+        Err(msg) => json_err(StatusCode::BAD_REQUEST, msg),
+    }
+}
+
+// Export through the OS "save file" dialog so the user picks the exact location
+// (no more silent writes to Downloads). Returns { noDialog: true } when there's
+// no desktop app handle (headless / browser dev), so the UI can fall back to a
+// plain download.
+async fn export_native(State(st): St, body: Bytes) -> Response {
+    let v = parse_json(&body);
+    let format = jstr(&v, "format").unwrap_or("pdf").to_string();
+    let name = jstr(&v, "name").filter(|n| !n.is_empty()).unwrap_or("document").to_string();
+    let main_file = jstr(&v, "main").filter(|m| !m.is_empty()).unwrap_or("main.typ").to_string();
+    let ws = st.ws();
+    let ext = export_ext(&format).to_string();
+
+    let Some(app) = st.app.lock().unwrap().clone() else {
+        return Json(json!({ "ok": false, "noDialog": true })).into_response();
+    };
+    let suggested = format!("{name}.{ext}");
+    let ext_up = ext.to_uppercase();
+    let ext_filter = ext.clone();
+    let chosen = tokio::task::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        app.dialog().file().set_title("Export").set_file_name(&suggested)
+            .add_filter(ext_up, &[ext_filter.as_str()]).blocking_save_file()
+    }).await.ok().flatten().and_then(|fp| fp.into_path().ok());
+    let Some(chosen) = chosen else {
+        return Json(json!({ "ok": false, "cancelled": true })).into_response();
+    };
+
+    if format == "typ" {
+        return match fs::copy(ws.join(&main_file), &chosen) {
+            Ok(_) => {
+                if wants_open(&v) { open_exported(&chosen.to_string_lossy(), 1); }
+                Json(json!({ "ok": true, "target": chosen.to_string_lossy(), "count": 1 })).into_response()
+            }
+            Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         };
     }
-    json_err(StatusCode::BAD_REQUEST, "Unknown format.")
+
+    let main_abs = ws.join(&main_file);
+    let multi = matches!(format.as_str(), "png" | "svg");
+    let dir = chosen.parent().map(Path::to_path_buf).unwrap_or_else(|| ws.clone());
+    let stem = chosen.file_stem().and_then(|s| s.to_str()).unwrap_or(&name).to_string();
+    let out_path = if multi { dir.join(format!("{stem}-{{p}}.{ext}")) } else { chosen.clone() };
+    match run_typst_export(&ws, &main_abs, &out_path, &v, &format).await {
+        Ok(()) => {
+            let (count, first) = if multi { collapse_pages(&dir, &stem, &ext) }
+                else { (1, chosen.to_string_lossy().into_owned()) };
+            if wants_open(&v) { open_exported(&first, count as u64); }
+            Json(json!({ "ok": true, "target": first, "count": count })).into_response()
+        }
+        Err(msg) => json_err(StatusCode::BAD_REQUEST, msg),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -722,7 +1007,7 @@ fn cmp_version(a: &str, b: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
-async fn get_universe_index(st: &AppState) -> Option<Arc<Vec<Value>>> {
+async fn get_universe_index(st: &AppState) -> Option<Arc<Vec<Pkg>>> {
     let mut guard = st.universe.lock().await;
     if let Some((at, idx)) = guard.as_ref() {
         if at.elapsed() < UNIVERSE_TTL {
@@ -766,7 +1051,14 @@ async fn get_universe_index(st: &AppState) -> Option<Arc<Vec<Value>>> {
             }
         }
     }
-    let idx = Arc::new(by_name.into_values().collect::<Vec<_>>());
+    let idx = Arc::new(by_name.into_values().map(|value| {
+        let name_lc = value.get("name").and_then(|x| x.as_str()).unwrap_or("").to_lowercase();
+        let desc = value.get("description").and_then(|x| x.as_str()).unwrap_or("");
+        let keywords = value.get("keywords").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|k| k.as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+        let categories = value.get("categories").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|k| k.as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+        let hay = format!("{name_lc} {desc} {keywords} {categories}").to_lowercase();
+        Pkg { value, name_lc, hay }
+    }).collect::<Vec<_>>());
     *guard = Some((Instant::now(), idx.clone()));
     Some(idx)
 }
@@ -781,28 +1073,23 @@ async fn packages_search(State(st): St, Query(q): Q) -> Response {
     let tokens: Vec<&str> = query.split(|c: char| !c.is_ascii_alphanumeric()).filter(|t| t.len() > 1).collect();
     let mut scored: Vec<(i64, &Value)> = Vec::new();
     for p in idx.iter() {
-        let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("").to_lowercase();
-        let desc = p.get("description").and_then(|x| x.as_str()).unwrap_or("");
-        let keywords = p.get("keywords").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|k| k.as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default();
-        let categories = p.get("categories").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|k| k.as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default();
-        let hay = format!("{name} {desc} {keywords} {categories}").to_lowercase();
         let mut score = 0i64;
         if tokens.is_empty() {
             score = 1;
         } else {
             for t in &tokens {
-                if name.contains(t) {
+                if p.name_lc.contains(t) {
                     score += 3;
-                } else if hay.contains(t) {
+                } else if p.hay.contains(t) {
                     score += 1;
                 }
             }
         }
         if score > 0 {
-            scored.push((score, p));
+            scored.push((score, &p.value));
         }
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|x| std::cmp::Reverse(x.0));
     let out: Vec<Value> = scored
         .iter()
         .take(15)
@@ -839,8 +1126,31 @@ async fn git(ws: &Path, args: &[&str]) -> CmdOut {
     }
 }
 
+// Same as git(), but with a wall-clock cap for the network operations (push)
+// so a stalled connection can't leave the request hanging indefinitely.
+async fn git_timed(ws: &Path, args: &[&str], ms: u64) -> CmdOut {
+    match run_cmd("git", args, Some(ws), Some(ms)).await {
+        Ok(o) => o,
+        Err(e) => CmdOut { code: Some(1), killed: false, stdout: String::new(), stderr: e.to_string() },
+    }
+}
+
 fn is_repo(ws: &Path) -> bool {
     ws.join(".git").exists()
+}
+
+// Drop any credentials embedded in a remote URL (https://token@host/… or
+// https://user:pass@host/…) before it's shown in the UI or logged. Only the
+// userinfo ahead of the host is touched; the path is left alone.
+fn strip_url_creds(url: &str) -> String {
+    if let Some(i) = url.find("://") {
+        let (scheme, rest) = url.split_at(i + 3);
+        let host_end = rest.find('/').unwrap_or(rest.len());
+        if let Some(at) = rest[..host_end].find('@') {
+            return format!("{scheme}{}", &rest[at + 1..]);
+        }
+    }
+    url.to_string()
 }
 
 async fn git_status(State(st): St) -> Response {
@@ -855,7 +1165,7 @@ async fn git_status(State(st): St) -> Response {
     Json(json!({
         "initialized": true,
         "branch": if branch.code == Some(0) { branch.stdout.trim().to_string() } else { "main".to_string() },
-        "remote": if remote.code == Some(0) { Value::String(remote.stdout.trim().to_string()) } else { Value::Null },
+        "remote": if remote.code == Some(0) { Value::String(strip_url_creds(remote.stdout.trim())) } else { Value::Null },
         "changes": files,
         "clean": files.is_empty(),
     }))
@@ -877,7 +1187,7 @@ async fn git_init(State(st): St) -> Response {
         return json_err(StatusCode::INTERNAL_SERVER_ERROR, if init.stderr.is_empty() { "git init failed".into() } else { init.stderr });
     }
     git_init_defaults(&ws).await;
-    let _ = fs::write(ws.join(".gitignore"), "*.pdf\nout.pdf\n.DS_Store\n");
+    let _ = fs::write(ws.join(".gitignore"), ".hilbert/\n*.pdf\n.DS_Store\n");
     Json(json!({ "ok": true, "message": "Initialized empty Git repository." })).into_response()
 }
 
@@ -941,28 +1251,44 @@ async fn git_push(State(st): St, body: Bytes) -> Response {
     let url = jstr(&v, "url").unwrap_or("");
     let token = jstr(&v, "token").unwrap_or("");
     let branch = jstr(&v, "branch").filter(|b| !b.is_empty()).unwrap_or("main");
-    // Inject a GitHub token into the HTTPS URL so the push is non-interactive.
-    let push_url = if !token.is_empty() && url.starts_with("https://") {
-        url.replacen("https://", &format!("https://{token}@"), 1)
-    } else {
-        url.to_string()
-    };
-    if !push_url.is_empty() {
+
+    // Keep `origin` pointed at the clean URL — the token is never written into
+    // .git/config (the settings panel promises it isn't stored). It's injected
+    // only into the one-shot push target below.
+    if !url.is_empty() {
         let has = git(&ws, &["remote", "get-url", "origin"]).await;
         let set = if has.code == Some(0) {
-            git(&ws, &["remote", "set-url", "origin", &push_url]).await
+            git(&ws, &["remote", "set-url", "origin", url]).await
         } else {
-            git(&ws, &["remote", "add", "origin", &push_url]).await
+            git(&ws, &["remote", "add", "origin", url]).await
         };
         if set.code != Some(0) {
             return json_err(StatusCode::INTERNAL_SERVER_ERROR, set.stderr);
         }
     }
-    let push = git(&ws, &["push", "-u", "origin", branch]).await;
+
+    // Push straight to a tokened URL when we have one, so authentication works
+    // without leaving the secret behind. Otherwise fall back to `origin`.
+    let target = if !token.is_empty() && url.starts_with("https://") {
+        url.replacen("https://", &format!("https://{token}@"), 1)
+    } else if !url.is_empty() {
+        url.to_string()
+    } else {
+        "origin".to_string()
+    };
+    let refspec = format!("HEAD:{branch}");
+    let push = git_timed(&ws, &["push", &target, &refspec], 120_000).await;
     // Scrub the token from any echoed output before returning it.
     let scrub = |s: &str| if token.is_empty() { s.to_string() } else { s.replace(token, "***") };
     if push.code != Some(0) {
-        return json_err(StatusCode::INTERNAL_SERVER_ERROR, scrub(if push.stderr.is_empty() { "Push failed." } else { &push.stderr }));
+        let err = if push.killed {
+            "Push timed out after 120s — check your connection and token.".to_string()
+        } else if !push.stderr.is_empty() {
+            scrub(&push.stderr)
+        } else {
+            "Push failed.".to_string()
+        };
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, err);
     }
     let msg = if !push.stderr.is_empty() {
         push.stderr
@@ -1373,17 +1699,36 @@ fn wrap_for_equation(lang: &str, code: &str) -> String {
 // access or destructive file ops. Heuristic, NOT a real sandbox.
 static DENY_COMMON: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
-        r"\bsubprocess\b", r"\bsocket\b", r"\bos\.system\b", r"\bos\.popen\b", r"(?i)\bpopen\b",
-        r"\beval\s*\(", r"\bexec\s*\(", r"\b__import__\b", r"\brequests\b", r"\burllib\b",
-        r"\bshutil\b", r"\bos\.remove\b", r"\bos\.unlink\b", r"\brmtree\b", r"\bpickle\b",
-        r"\bctypes\b", r"\bos\.environ\b",
+        // process / shell / dynamic-exec
+        r"\bsubprocess\b", r"\bos\.system\b", r"\bos\.popen\b", r"(?i)\bpopen\b",
+        r"\bos\.fork\b", r"\bos\.exec\w*", r"\bos\.spawn\w*", r"\bposix_spawn\b",
+        r"\bmultiprocessing\b", r"\bpty\b", r"\bcommands\b",
+        r"\beval\s*\(", r"\bexec\s*\(", r"\bcompile\s*\(", r"\b__import__\b",
+        r"\bimportlib\b", r"\bmarshal\b",
+        // networking
+        r"\bsocket\b", r"\brequests\b", r"\burllib\b", r"\bhttpx\b", r"\baiohttp\b",
+        r"\bhttp\.client\b", r"\bsmtplib\b", r"\bftplib\b", r"\btelnetlib\b",
+        r"\bxmlrpc\b", r"\bsocketserver\b", r"\bwebbrowser\b", r"\bparamiko\b",
+        // filesystem: destructive, escaping cwd, or environment tampering
+        r"\bshutil\b", r"\bos\.remove\b", r"\bos\.unlink\b", r"\.unlink\s*\(",
+        r"\brmtree\b", r"\bos\.rmdir\b", r"\bos\.rename\b", r"\bos\.replace\b",
+        r"\bos\.chdir\b", r"\bos\.chmod\b", r"\bos\.chown\b", r"\bos\.truncate\b",
+        r"\bos\.environ\b", r"\bos\.putenv\b", r"\bpickle\b", r"\bctypes\b",
+        r#"open\s*\(\s*[rbfu]*['"]\s*(/|~|\.\.)"#,
     ]
     .iter()
     .map(|p| Regex::new(p).unwrap())
     .collect()
 });
 static DENY_JULIA: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [r"\brun\s*\(", r"\bdownload\s*\(", r"\bSys\.\w", r"\bccall\b", r"\bpipeline\s*\(", r"\bopen\s*\(`", r"\brm\s*\(", r"\bmv\s*\("]
+    [
+        r"\brun\s*\(", r"\bdownload\s*\(", r"\bSys\.\w", r"\bccall\b", r"\bpipeline\s*\(",
+        r"\bopen\s*\(`", r"\brm\s*\(", r"\bmv\s*\(", r"\bcp\s*\(", r"\bcd\s*\(",
+        r"\btouch\s*\(", r"\bchmod\s*\(", r"\bchown\s*\(", r"\bsymlink\s*\(",
+        r"\binclude\s*\(", r"\bevalfile\b", r"\bLibdl\b", r"\bLibc\b", r"\bunsafe_\w",
+        r"\bPkg\.", r"\bHTTP\.", r"\bSockets\b", r"\bDistributed\b", r"\baddprocs\b",
+        r#"open\s*\(\s*"\s*(/|~|\.\.)"#,
+    ]
         .iter()
         .map(|p| Regex::new(p).unwrap())
         .collect()
@@ -1391,8 +1736,11 @@ static DENY_JULIA: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 static DENY_WOLFRAM: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
         r"\bRun\s*\[", r"\bRunProcess\s*\[", r"\bStartProcess\s*\[", r"\bDeleteFile\s*\[",
-        r"\bDeleteDirectory\s*\[", r"\bURL(Fetch|Read|Submit|Save)\s*\[", r"\bSystemOpen\s*\[",
-        r"\bCreateFile\s*\[", r#"(?i)\bImport\s*\[\s*"https?:"#,
+        r"\bDeleteDirectory\s*\[", r"\bURL(Fetch|Read|Submit|Save|Download|Execute)\s*\[",
+        r"\bSystemOpen\s*\[", r"\bCreateFile\s*\[", r#"(?i)\bImport\s*\[\s*"https?:"#,
+        r"\bExternalEvaluate\s*\[", r"\bStartExternalSession\s*\[", r"\bLibraryFunctionLoad\s*\[",
+        r"\bInstall\s*\[", r"\bDumpSave\s*\[", r"\bOpenWrite\s*\[", r"\bOpenAppend\s*\[",
+        r"\bSendMail\s*\[", r"\bCloudDeploy\s*\[", r"\bDeleteObject\s*\[",
     ]
     .iter()
     .map(|p| Regex::new(p).unwrap())
@@ -1433,6 +1781,57 @@ fn image_stats(dir: &Path) -> HashMap<String, f64> {
     m
 }
 
+// Reserved per-workspace scratch dir. Compile output and code-exec scratch live
+// here (hidden, since it's a dotfile), so they never clutter the user's files —
+// and it's the future home for per-workspace settings and logs.
+fn hilbert_dir(ws: &Path) -> PathBuf { ws.join(".hilbert") }
+fn hilbert_run(ws: &Path) -> PathBuf { hilbert_dir(ws).join("run") }
+
+// Python/Julia logos used to badge code blocks in the compiled PDF. Written into
+// the (hidden) .hilbert dir so a document's `#image(".hilbert/logos/…")` show
+// rule always resolves, and they never clutter the user's files.
+const PY_LOGO_SVG: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path fill='#3776AB' d='M15.9 2C9 2 9.5 5 9.5 5v3.1h6.6v.9H6.9S2.5 8.6 2.5 15.9c0 7.4 3.8 7.1 3.8 7.1h2.3v-3.3s-.1-3.9 3.8-3.9h6.5s3.7.1 3.7-3.6V6.2S24 2 15.9 2zM12.2 4.1c.6 0 1.1.5 1.1 1.1s-.5 1.1-1.1 1.1-1.1-.5-1.1-1.1.5-1.1 1.1-1.1z'/><path fill='#FFD43B' d='M16.1 30c6.9 0 6.4-3 6.4-3v-3.1h-6.6v-.9h9.2s4.4.5 4.4-7.1c0-7.3-3.8-7.1-3.8-7.1h-2.3v3.3s.1 3.9-3.8 3.9h-6.5s-3.7-.1-3.7 3.6v6.1S8 30 16.1 30zm3.7-2.1c-.6 0-1.1-.5-1.1-1.1s.5-1.1 1.1-1.1 1.1.5 1.1 1.1-.5 1.1-1.1 1.1z'/></svg>";
+const JL_LOGO_SVG: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='10' cy='22' r='5.5' fill='#389826'/><circle cx='22' cy='22' r='5.5' fill='#9558B2'/><circle cx='16' cy='9' r='5.5' fill='#CB3C33'/></svg>";
+
+// Ensure the scratch dir exists, drop the legacy root out.pdf, and make sure the
+// code-block logos are present so a compile referencing them never fails.
+fn ensure_hilbert(ws: &Path) {
+    let _ = fs::create_dir_all(hilbert_run(ws));
+    let legacy = ws.join("out.pdf");
+    if legacy.exists() { let _ = fs::remove_file(&legacy); }
+    let logos = hilbert_dir(ws).join("logos");
+    let _ = fs::create_dir_all(&logos);
+    let py = logos.join("python.svg");
+    if !py.exists() { let _ = fs::write(&py, PY_LOGO_SVG); }
+    let jl = logos.join("julia.svg");
+    if !jl.exists() { let _ = fs::write(&jl, JL_LOGO_SVG); }
+}
+
+// Move freshly-produced plot images out of the ephemeral run dir into a visible,
+// persistent assets/ folder. A document that embeds a plot references it, so it
+// must survive the scratch dir being swept — assets/ is the right home for it.
+// Returns the workspace-relative paths to reference from the document.
+fn promote_images(ws: &Path, run_dir: &Path, names: &[String]) -> Vec<String> {
+    if names.is_empty() { return Vec::new(); }
+    let assets = ws.join("assets");
+    let _ = fs::create_dir_all(&assets);
+    let mut out = Vec::new();
+    for name in names {
+        let from = run_dir.join(name);
+        let to = assets.join(name);
+        // rename is atomic within one filesystem; fall back to copy+remove.
+        if fs::rename(&from, &to).is_ok()
+            || (fs::copy(&from, &to).is_ok() && { let _ = fs::remove_file(&from); true })
+        {
+            out.push(format!("assets/{name}"));
+        } else if from.exists() {
+            out.push(format!(".hilbert/run/{name}"));
+        }
+    }
+    out.sort();
+    out
+}
+
 async fn run_code(State(st): St, body: Bytes) -> Response {
     static CONNECTING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"Connecting….*?\n").unwrap());
     if !st.allow_exec {
@@ -1467,7 +1866,8 @@ async fn run_code(State(st): St, body: Bytes) -> Response {
         return json_err(StatusCode::BAD_REQUEST, format!("{lang} is not available on this system."));
     };
 
-    let sandbox = st.ws().join("sandbox");
+    let ws = st.ws();
+    let sandbox = hilbert_run(&ws);
     let _ = fs::create_dir_all(&sandbox);
     let script_name = format!("_run.{ext}");
     let script_path = sandbox.join(&script_name);
@@ -1483,19 +1883,19 @@ async fn run_code(State(st): St, body: Bytes) -> Response {
         "julia" => vec!["--startup-file=no", "-q", &script_name],
         _ => vec![&script_name],
     };
-    let out = match run_cmd(&chosen.path, &args, Some(&sandbox), Some(st.exec_timeout_ms)).await {
+    let out = match run_exec_cmd(&chosen.path, &args, Some(&sandbox), Some(st.exec_timeout_ms)).await {
         Ok(o) => o,
         Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to start {lang}: {e}")),
     };
 
-    // Report new OR rewritten images, referenced relative to the workspace.
+    // New OR rewritten images become persistent assets/ files (see promote_images).
     let after = image_stats(&sandbox);
-    let mut images: Vec<String> = after
+    let changed: Vec<String> = after
         .iter()
         .filter(|(f, t)| before.get(*f).map(|old| old != *t).unwrap_or(true))
-        .map(|(f, _)| format!("sandbox/{f}"))
+        .map(|(f, _)| f.clone())
         .collect();
-    images.sort();
+    let images = promote_images(&ws, &sandbox, &changed);
 
     Json(json!({
         "ok": out.code == Some(0) && !out.killed,
@@ -1507,6 +1907,190 @@ async fn run_code(State(st): St, body: Bytes) -> Response {
         "images": images,
     }))
     .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Notebook execution — run a document's code chunks in ONE persistent session
+// per language, so variables carry from chunk to chunk (Jupyter-style). Idea
+// borrowed from calepin: a single interpreter process executes every chunk in a
+// shared namespace, and each chunk's result is framed with a random sentinel so
+// the combined output can be split back apart. Nothing stays resident between
+// runs — the process lives only for the length of one run.
+// ---------------------------------------------------------------------------
+
+const NB_PY: &str = r#"import sys, io, os, base64, traceback, ast
+os.environ.setdefault("MPLBACKEND", "Agg")
+SEP = "__SEP__"; SENT = "__SENT__"
+src = open("nb_cells.txt", encoding="utf-8").read()
+cells = src.split("\n" + SEP + "\n") if src else []
+g = {"__name__": "__main__"}
+real = sys.__stdout__
+def _pngs(): return {f: os.path.getmtime(f) for f in os.listdir(".") if f.lower().endswith(".png")}
+def _b(s): return base64.b64encode(s.encode("utf-8")).decode("ascii")
+for i, code in enumerate(cells):
+    before = _pngs(); buf = io.StringIO(); old = sys.stdout; sys.stdout = buf; err = ""
+    try:
+        tree = ast.parse(code)
+        if tree.body and isinstance(tree.body[-1], ast.Expr):
+            last = tree.body.pop()
+            exec(compile(tree, "<cell>", "exec"), g)
+            val = eval(compile(ast.Expression(last.value), "<cell>", "eval"), g)
+            if val is not None: print(repr(val))
+        else:
+            exec(compile(code, "<cell>", "exec"), g)
+    except SystemExit:
+        pass
+    except BaseException:
+        err = traceback.format_exc()
+    finally:
+        sys.stdout = old
+    imgs = []
+    try:
+        import matplotlib.pyplot as plt
+        if plt.get_fignums():
+            p = "nb_cell%d.png" % i; plt.gcf().savefig(p, dpi=130, bbox_inches="tight"); plt.close("all"); imgs.append(p)
+    except Exception:
+        pass
+    after = _pngs()
+    for f in sorted(after):
+        if f not in imgs and (f not in before or after[f] != before[f]): imgs.append(f)
+    real.write("%s\t%d\t%s\t%s\t%s\n" % (SENT, i, _b(buf.getvalue()), _b(err), ",".join(imgs))); real.flush()
+"#;
+
+const NB_JL: &str = r#"using Base64
+SEP = "__SEP__"; SENT = "__SENT__"
+src = read("nb_cells.txt", String)
+cells = isempty(src) ? String[] : split(src, "\n" * SEP * "\n")
+real = stdout
+pngs() = Dict(f => mtime(f) for f in filter(x->endswith(lowercase(x), ".png"), readdir(".")))
+for (idx, code) in enumerate(cells)
+    i = idx - 1
+    before = pngs()
+    outfile = "nb_out_$i.txt"
+    err = ""
+    open(outfile, "w") do io
+        redirect_stdout(io) do
+            try
+                val = include_string(Main, code, "cell_$i")
+                # Echo the last expression's value, IJulia-style, unless the cell
+                # ends with ';' or the value is nothing.
+                if val !== nothing && !endswith(rstrip(code), ";")
+                    # invokelatest: the cell may have just `using`-ed a package
+                    # (e.g. Plots), defining methods in a newer world age. This
+                    # loop body runs at the world captured before that, so calling
+                    # show()/showable() directly would hit "method too new" world-age
+                    # errors — invokelatest runs them in the current world instead.
+                    # A displayable value (a plot) is written to a PNG so the
+                    # notebook shows it as an image; anything else echoes as text.
+                    if Base.invokelatest(showable, "image/png", val)
+                        open("nb_plot_$i.png", "w") do pio
+                            Base.invokelatest(show, pio, "image/png", val)
+                        end
+                    else
+                        Base.invokelatest(show, stdout, "text/plain", val); println(stdout)
+                    end
+                end
+            catch e
+                err = sprint(showerror, e)
+            end
+        end
+    end
+    out = read(outfile, String)
+    rm(outfile, force=true)
+    after = pngs()
+    imgs = sort([f for f in keys(after) if !haskey(before, f) || after[f] != before[f]])
+    println(real, join([SENT, string(i), base64encode(out), base64encode(err), join(imgs, ",")], "\t"))
+    flush(real)
+end
+"#;
+
+async fn notebook_run(State(st): St, body: Bytes) -> Response {
+    if !st.allow_exec {
+        return json_err(StatusCode::FORBIDDEN, "Code execution is disabled on this server (ALLOW_CODE_EXECUTION=0).");
+    }
+    let v = parse_json(&body);
+    let lang = jstr(&v, "lang").unwrap_or("");
+    let bin = jstr(&v, "bin").unwrap_or("");
+    if lang != "python" && lang != "julia" {
+        return json_err(StatusCode::BAD_REQUEST, "Notebook run supports only python and julia.");
+    }
+    let cells: Vec<String> = v.get("cells").and_then(|c| c.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if cells.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "No code cells to run.");
+    }
+    // Same heuristic safety screen as the one-shot runner, per cell.
+    for (i, c) in cells.iter().enumerate() {
+        if let Some(blocked) = screen_code(lang, c) {
+            return json_err(StatusCode::BAD_REQUEST, format!("Cell {} blocked for safety: code uses \"{}\" (process/network/filesystem access is not allowed).", i + 1, blocked));
+        }
+    }
+    let options = st.interpreters.for_lang(lang);
+    let Some(chosen) = options.iter().find(|o| o.path == bin).or_else(|| options.first()) else {
+        return json_err(StatusCode::BAD_REQUEST, format!("{lang} is not available on this system."));
+    };
+
+    let ws = st.ws();
+    let sandbox = hilbert_run(&ws);
+    let _ = fs::create_dir_all(&sandbox);
+
+    // Random sentinel + separator so user output can never be mistaken for framing.
+    let tag = format!("{:x}{:x}", std::process::id(), epoch_ms(SystemTime::now()) as u64);
+    let sep = format!("<<<CELL {tag}>>>");
+    let sent = format!("@@NB{tag}@@");
+
+    let joined = cells.join(&format!("\n{sep}\n"));
+    if fs::write(sandbox.join("nb_cells.txt"), joined).is_err() {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, "Could not stage notebook cells.");
+    }
+    let (script_name, harness) = match lang {
+        "julia" => ("_nb.jl", NB_JL),
+        _ => ("_nb.py", NB_PY),
+    };
+    let script = harness.replace("__SEP__", &sep).replace("__SENT__", &sent);
+    if fs::write(sandbox.join(script_name), script).is_err() {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, "Could not write notebook harness.");
+    }
+
+    let args: Vec<&str> = match lang {
+        "julia" => vec!["--startup-file=no", "-q", script_name],
+        _ => vec![script_name],
+    };
+    // One process runs every cell, so give it room proportional to cell count.
+    let timeout = st.exec_timeout_ms.saturating_mul(cells.len() as u64).min(600_000);
+    let out = match run_exec_cmd(&chosen.path, &args, Some(&sandbox), Some(timeout)).await {
+        Ok(o) => o,
+        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to start {lang}: {e}")),
+    };
+
+    // Split the sentinel-framed lines into per-cell results.
+    let mut results: Vec<Value> = (0..cells.len())
+        .map(|_| json!({ "stdout": "", "error": "Cell did not run (the session ended before reaching it).", "images": [] }))
+        .collect();
+    let dec = |s: &str| -> String {
+        base64::engine::general_purpose::STANDARD.decode(s).ok().and_then(|b| String::from_utf8(b).ok()).unwrap_or_default()
+    };
+    let prefix = format!("{sent}\t");
+    for line in out.stdout.lines() {
+        let Some(rest) = line.strip_prefix(&prefix) else { continue };
+        let parts: Vec<&str> = rest.splitn(4, '\t').collect();
+        if parts.len() < 4 { continue; }
+        let Ok(idx) = parts[0].parse::<usize>() else { continue };
+        if idx >= results.len() { continue; }
+        let names: Vec<String> = parts[3].split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+        let imgs = promote_images(&ws, &sandbox, &names);
+        results[idx] = json!({ "stdout": dec(parts[1]), "error": dec(parts[2]), "images": imgs });
+    }
+
+    let any_sentinel = out.stdout.contains(&sent);
+    Json(json!({
+        "ok": out.code == Some(0) && !out.killed && any_sentinel,
+        "timedOut": out.killed,
+        "interpreter": chosen.label,
+        "results": results,
+        "stderr": if any_sentinel { String::new() } else { out.stderr },
+    })).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1586,6 +2170,72 @@ async fn template_preview(State(st): St, Query(q): Q) -> Response {
     let bytes = fs::read(&out).unwrap_or_default();
     let _ = fs::write(&cached, &bytes);
     cleanup(&dir);
+    ([(header::CONTENT_TYPE, "image/png")], bytes).into_response()
+}
+
+// Render page 1 of an app-bundled starter template to a PNG, so the New-from-
+// Template dialog can preview the built-ins the same way it previews Universe
+// ones. The template's files ride along in the request (they live in the
+// frontend), get written to a throwaway temp dir, and are compiled there —
+// never in the user's workspace. Cached by a hash of the entry content so
+// re-selecting a template is instant.
+async fn builtin_preview(body: Bytes) -> Response {
+    use std::hash::{Hash, Hasher};
+    let v = parse_json(&body);
+    let Some(entry) = jstr(&v, "entry").filter(|e| !e.is_empty()) else {
+        return json_err(StatusCode::BAD_REQUEST, "entry required");
+    };
+    let Some(files) = v.get("files").and_then(|f| f.as_array()) else {
+        return json_err(StatusCode::BAD_REQUEST, "files required");
+    };
+    let entry_content = files
+        .iter()
+        .find(|f| f.get("path").and_then(|x| x.as_str()) == Some(entry))
+        .and_then(|f| f.get("content").and_then(|x| x.as_str()))
+        .unwrap_or("");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    entry_content.hash(&mut hasher);
+    let key = format!("{:x}", hasher.finish());
+
+    let cache_dir = std::env::temp_dir().join("typst-editor-builtin-previews");
+    let _ = fs::create_dir_all(&cache_dir);
+    let cached = cache_dir.join(format!("{key}.png"));
+    if let Ok(bytes) = fs::read(&cached) {
+        return ([(header::CONTENT_TYPE, "image/png")], bytes).into_response();
+    }
+
+    let dir = std::env::temp_dir().join(format!("typst-editor-bp-{}-{key}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::create_dir_all(&dir);
+    for f in files {
+        let (Some(p), Some(c)) = (
+            f.get("path").and_then(|x| x.as_str()),
+            f.get("content").and_then(|x| x.as_str()),
+        ) else { continue };
+        let Some(full) = safe_workspace_path(&dir, p) else { continue };
+        if let Some(parent) = full.parent() { let _ = fs::create_dir_all(parent); }
+        let _ = fs::write(&full, c);
+    }
+    let Some(entry_path) = safe_workspace_path(&dir, entry) else {
+        let _ = fs::remove_dir_all(&dir);
+        return json_err(StatusCode::BAD_REQUEST, "bad entry path");
+    };
+    let out = dir.join("preview.png");
+    let comp = run_cmd(
+        "typst",
+        &["compile", "--root", &dir.to_string_lossy(), "--format", "png", "--pages", "1", &entry_path.to_string_lossy(), &out.to_string_lossy()],
+        Some(&dir),
+        Some(45000),
+    )
+    .await;
+    let ok = matches!(comp, Ok(ref o) if o.code == Some(0)) && out.exists();
+    if !ok {
+        let _ = fs::remove_dir_all(&dir);
+        return json_err(StatusCode::BAD_REQUEST, "Could not render preview.");
+    }
+    let bytes = fs::read(&out).unwrap_or_default();
+    let _ = fs::write(&cached, &bytes);
+    let _ = fs::remove_dir_all(&dir);
     ([(header::CONTENT_TYPE, "image/png")], bytes).into_response()
 }
 
@@ -1958,7 +2608,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 async fn lsp_write(stdin: &mut tokio::process::ChildStdin, obj: &Value) {
     let json = obj.to_string();
-    let header = format!("Content-Length: {}\r\n\r\n", json.as_bytes().len());
+    let header = format!("Content-Length: {}\r\n\r\n", json.len());
     let _ = stdin.write_all(header.as_bytes()).await;
     let _ = stdin.write_all(json.as_bytes()).await;
     let _ = stdin.flush().await;
@@ -2056,8 +2706,7 @@ async fn ensure_lsp(ws: &Path) -> bool {
                 Ok(n) => n,
             };
             buf.extend_from_slice(&chunk[..n]);
-            loop {
-                let Some(hdr_end) = find_subslice(&buf, b"\r\n\r\n") else { break };
+            while let Some(hdr_end) = find_subslice(&buf, b"\r\n\r\n") {
                 let header = String::from_utf8_lossy(&buf[..hdr_end]).to_ascii_lowercase();
                 let len = header
                     .lines()
@@ -2203,6 +2852,16 @@ async fn lsp_completion(State(st): St, body: Bytes) -> Response {
 // (harper-core with a Typst-aware parser). Runs on a blocking thread so the
 // dictionary work never stalls the async runtime.
 async fn lint_text(body: Bytes) -> Response {
+    // The spell/grammar dictionaries cost ~150 MB resident, and proofreading is off
+    // by default, so nothing is loaded until the feature is actually used. The client
+    // probes this route the moment the user switches proofreading on, and that probe
+    // starts the load in the background, so the dictionaries are ready well before
+    // the first sentence is typed.
+    static WARM: std::sync::Once = std::sync::Once::new();
+    WARM.call_once(|| {
+        std::thread::spawn(crate::proofread::warm);
+    });
+
     let v = parse_json(&body);
     let text = jstr(&v, "text").unwrap_or("").to_string();
     if text.trim().is_empty() {
@@ -2314,6 +2973,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/workspace/search", get(workspace_search))
         .route("/workspace/raw", get(workspace_raw))
         .route("/workspace/compress", post(workspace_compress))
+        .route("/data/xlsx", post(data_xlsx))
         .route("/compile", post(compile))
         .route("/compile/html", get(compile_html))
         .route("/init-template", post(init_template))
@@ -2329,10 +2989,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/git/log", get(git_log))
         .route("/drive/sync", post(drive_sync))
         .route("/export", post(export))
+        .route("/export/native", post(export_native))
         .route("/webdav/sync", post(webdav_sync))
         .route("/tools", get(tools))
         .route("/run", post(run_code))
+        .route("/notebook/run", post(notebook_run))
         .route("/template/preview", get(template_preview))
+        .route("/template/render-preview", post(builtin_preview))
         .route("/bib/fetch", post(bib_fetch))
         .route("/desktop/pick-folder", post(desktop_pick_folder))
         .route("/desktop/open", post(desktop_open))
