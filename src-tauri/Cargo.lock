@@ -7172,7 +7172,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "typst-editor"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -7195,6 +7195,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "tower-http",
+ "zip 2.4.2",
 ]
 
 [[package]]

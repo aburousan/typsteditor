@@ -896,44 +896,6 @@ fn wants_open(v: &Value) -> bool {
     v.get("open").and_then(Value::as_bool).unwrap_or(false)
 }
 
-async fn export(State(st): St, body: Bytes) -> Response {
-    let v = parse_json(&body);
-    let Some(folder) = jstr(&v, "folder").filter(|f| !f.is_empty()) else {
-        return json_err(StatusCode::BAD_REQUEST, "Destination folder required.");
-    };
-    let format = jstr(&v, "format").unwrap_or("pdf");
-    let name = jstr(&v, "name").filter(|n| !n.is_empty()).unwrap_or("document");
-    let main_file = jstr(&v, "main").filter(|m| !m.is_empty()).unwrap_or("main.typ");
-    let ws = st.ws();
-    if let Err(e) = fs::create_dir_all(folder) {
-        return json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
-    }
-    if format == "typ" {
-        let target = Path::new(folder).join(format!("{name}.typ"));
-        return match fs::copy(ws.join(main_file), &target) {
-            Ok(_) => {
-                if wants_open(&v) { open_exported(&target.to_string_lossy(), 1); }
-                Json(json!({ "ok": true, "target": target.to_string_lossy(), "count": 1 })).into_response()
-            }
-            Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        };
-    }
-    let ext = export_ext(format);
-    let multi = matches!(format, "png" | "svg");
-    let main_abs = ws.join(main_file);
-    let out_name = if multi { format!("{name}-{{p}}.{ext}") } else { format!("{name}.{ext}") };
-    let out_path = Path::new(folder).join(out_name);
-    match run_typst_export(&ws, &main_abs, &out_path, &v, format).await {
-        Ok(()) => {
-            let (count, first) = if multi { collapse_pages(Path::new(folder), name, ext) }
-                else { (1, out_path.to_string_lossy().into_owned()) };
-            if wants_open(&v) { open_exported(&first, count as u64); }
-            Json(json!({ "ok": true, "target": first, "count": count })).into_response()
-        }
-        Err(msg) => json_err(StatusCode::BAD_REQUEST, msg),
-    }
-}
-
 // Export through the OS "save file" dialog so the user picks the exact location
 // (no more silent writes to Downloads). Returns { noDialog: true } when there's
 // no desktop app handle (headless / browser dev), so the UI can fall back to a
@@ -984,6 +946,63 @@ async fn export_native(State(st): St, body: Bytes) -> Response {
             Json(json!({ "ok": true, "target": first, "count": count })).into_response()
         }
         Err(msg) => json_err(StatusCode::BAD_REQUEST, msg),
+    }
+}
+
+// Export the whole project as a single .zip through the OS save dialog. Uses a
+// pure-Rust zip writer, so it behaves the same on Windows, macOS and Linux with
+// no dependency on a system `zip` binary. The file set matches cloud sync: source
+// plus assets, skipping dotfiles, node_modules, the sandbox and built PDFs.
+async fn export_project_native(State(st): St, body: Bytes) -> Response {
+    let v = parse_json(&body);
+    let name = jstr(&v, "name").filter(|n| !n.is_empty()).unwrap_or("project").to_string();
+    let open_after = wants_open(&v);
+    let ws = st.ws();
+
+    let Some(app) = st.app.lock().unwrap().clone() else {
+        return Json(json!({ "ok": false, "noDialog": true })).into_response();
+    };
+    let suggested = format!("{name}.zip");
+    let chosen = tokio::task::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        app.dialog().file().set_title("Export project").set_file_name(&suggested)
+            .add_filter("ZIP archive", &["zip"]).blocking_save_file()
+    }).await.ok().flatten().and_then(|fp| fp.into_path().ok());
+    let Some(chosen) = chosen else {
+        return Json(json!({ "ok": false, "cancelled": true })).into_response();
+    };
+
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    collect_workspace(&ws, "", &mut files);
+    if files.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "The project has no files to archive.");
+    }
+
+    let target = chosen.clone();
+    let res = tokio::task::spawn_blocking(move || -> std::io::Result<usize> {
+        use std::io::Write as _;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+        let f = fs::File::create(&target)?;
+        let mut zip = ZipWriter::new(f);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let mut n = 0usize;
+        for (rel, full) in &files {
+            let Ok(bytes) = fs::read(full) else { continue };
+            zip.start_file(rel.as_str(), opts)?;
+            zip.write_all(&bytes)?;
+            n += 1;
+        }
+        zip.finish()?;
+        Ok(n)
+    }).await;
+
+    match res {
+        Ok(Ok(count)) => {
+            if open_after { reveal_in_file_manager(&chosen); }
+            Json(json!({ "ok": true, "target": chosen.to_string_lossy(), "count": count })).into_response()
+        }
+        Ok(Err(e)) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -1301,34 +1320,6 @@ async fn git_push(State(st): St, body: Bytes) -> Response {
         "Pushed.".into()
     };
     Json(json!({ "ok": true, "message": scrub(&msg) })).into_response()
-}
-
-async fn git_log(State(st): St) -> Response {
-    let ws = st.ws();
-    if !is_repo(&ws) {
-        return Json(json!({ "commits": [] })).into_response();
-    }
-    let sep = '\u{1f}';
-    let fmt = format!("--pretty=format:%h{sep}%an{sep}%ar{sep}%s");
-    let log = git(&ws, &["log", &fmt, "-n", "20"]).await;
-    let commits: Vec<Value> = if log.code == Some(0) {
-        log.stdout
-            .split('\n')
-            .filter(|l| !l.is_empty())
-            .map(|l| {
-                let parts: Vec<&str> = l.split(sep).collect();
-                json!({
-                    "hash": parts.first().unwrap_or(&""),
-                    "author": parts.get(1).unwrap_or(&""),
-                    "date": parts.get(2).unwrap_or(&""),
-                    "subject": parts.get(3).unwrap_or(&""),
-                })
-            })
-            .collect()
-    } else {
-        vec![]
-    };
-    Json(json!({ "commits": commits })).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -2989,10 +2980,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/git/remote", post(git_remote))
         .route("/git/commit", post(git_commit))
         .route("/git/push", post(git_push))
-        .route("/git/log", get(git_log))
         .route("/drive/sync", post(drive_sync))
-        .route("/export", post(export))
         .route("/export/native", post(export_native))
+        .route("/export/project/native", post(export_project_native))
         .route("/webdav/sync", post(webdav_sync))
         .route("/tools", get(tools))
         .route("/run", post(run_code))
