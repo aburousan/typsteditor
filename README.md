@@ -10,8 +10,9 @@
 
 > **Automatic updates:** Hilbert updates itself. Install it once and every future
 > version arrives on its own (it asks before installing). Grab it from the
-> [latest release](https://github.com/aburousan/hilbert-editor/releases/latest).
-> On Linux the AppImage auto-updates; the `.deb` does not.
+> [latest release](https://github.com/aburousan/hilbert-editor/releases/latest)
+> (currently 0.1.6). On Linux the AppImage auto-updates; the `.deb` does not.
+> [What changed in each version](docs/RELEASE_NOTES.md).
 
 It started as "an offline, Overleaf-feeling place to write physics and maths," and
 grew into a full scientific-writing IDE: a real code editor on the left, a live PDF

@@ -4,6 +4,37 @@ Paste the current section into the GitHub release when you cut a tag.
 
 ---
 
+## 0.1.6
+
+A hotfix for three things people ran into with 0.1.5.
+
+### Undo no longer resurrects the starter template
+
+Reopening the app and pressing Ctrl+Z could replace your document with the
+default starter text. The editor was quietly stacking your restored file on
+top of the template it seeds new documents with. Fixed — undo now stops at
+your own edits. Switching between projects also can't leak one document's
+undo history into another anymore.
+
+### The preview stopped flickering
+
+Typing used to blank the preview to white on every recompile before the pages
+came back. Pages now refresh in place: the old render stays on screen until
+the new one is ready, so nothing flashes. The compile-error bar moved to the
+bottom of the preview as well, so it no longer shoves the PDF down when an
+error appears mid-edit.
+
+### Export dialog, second pass
+
+PDF version and conformance standard (PDF/A, PDF/UA) are now separate
+choices instead of one mixed list. Exporting a project produces a single
+`.zip` through the save dialog rather than copying loose files into a folder
+— and the writer is built in, so it works the same on Windows. The redundant
+"save straight to a folder" path is gone, the fields match the rest of the
+UI, and the layout no longer jumps around when you switch formats.
+
+---
+
 ## 0.1.5
 
 ### Python and Julia notebooks
