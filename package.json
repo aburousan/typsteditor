@@ -16,8 +16,10 @@
   },
   "scripts": {
     "dev": "concurrently -k -n vite,api \"vite\" \"npm run dev:api\"",
-    "dev:api": "cd ../typst-editor-tauri/src-tauri && PORT=3001 cargo run -- --headless",
+    "dev:api": "cd src-tauri && PORT=3001 cargo run -- --headless",
+    "desktop": "npm run build && cd src-tauri && cargo run",
     "build": "tsc -b && vite build && node scripts/strip-bundled-secrets.mjs",
+    "test:backend": "cd src-tauri && cargo test",
     "lint": "oxlint",
     "preview": "vite preview"
   },

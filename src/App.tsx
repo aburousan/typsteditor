@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspens
 import { API } from './api';
 import Editor, { useMonaco } from '@monaco-editor/react';
 import ImageEditor from './ImageEditor';
-import ExcalidrawEditor from './ExcalidrawEditor';
 import { setupTypstLanguage, setWorkspaceImages } from './typstMonaco';
 import { useProofread } from './proofread';
 import ProofreadPanel from './components/ProofreadPanel';
@@ -34,6 +33,8 @@ import type { EqTemplate } from './components/EquationGallery';
 const FlowchartCoder = lazy(() => import('./components/FlowchartCoder'));
 const MatrixStudio = lazy(() => import('./components/MatrixStudio'));
 const ImagePlacer = lazy(() => import('./components/ImagePlacer'));
+const SlideStudio = lazy(() => import('./components/SlideStudio'));
+const ExcalidrawEditor = lazy(() => import('./ExcalidrawEditor'));
 import SymbolDraw from './components/SymbolDraw';
 import Boundary from './components/Boundary';
 import Toaster from './components/Toaster';
@@ -380,6 +381,14 @@ export default function App() {
   const [showPhysics, setShowPhysics] = useState(false);
   const [showMatrixStudio, setShowMatrixStudio] = useState(false);
   const [showImagePlacer, setShowImagePlacer] = useState<string | boolean>(false);
+  const [showSlideStudio, setShowSlideStudio] = useState(false);
+  const [slideDeckToken, setSlideDeckToken] = useState<string | null>(null);
+  // While Slide Studio is open it registers itself here, and the insert tools
+  // (galleries, builders, snippets) feed the current slide instead of the editor.
+  const slideCaptureRef = useRef<{ insert: (code: string) => void, ensure: (marker: string, rule: string) => void } | null>(null);
+  const registerSlideCapture = useCallback((capture: typeof slideCaptureRef.current) => {
+    slideCaptureRef.current = capture;
+  }, []);
 
   // Collect image file paths from the workspace tree for the ImagePlacer picker.
   const workspaceImages = useMemo(() => {
@@ -1590,6 +1599,11 @@ export default function App() {
   };
 
   const insertCode = (text: string) => {
+    if (slideCaptureRef.current) { slideCaptureRef.current.insert(text); return; }
+    insertCodeRaw(text);
+  };
+
+  const insertCodeRaw = (text: string) => {
     const editor = editorRef.current;
     const model = editor?.getModel();
     if (!editor || !model) return;
@@ -1712,6 +1726,7 @@ export default function App() {
   // (leading #import / #set / comment / blank lines). Used for title, author,
   // institute and abstract, which belong at the top regardless of the cursor.
   const insertAtTop = (text: string) => {
+    if (slideCaptureRef.current) { slideCaptureRef.current.ensure(text.trim().split('\n')[0], text.trim()); return; }
     const editor = editorRef.current;
     const model = editor?.getModel();
     if (!editor || !model) return;
@@ -1728,6 +1743,54 @@ export default function App() {
       forceMoveMarkers: true
     }]);
     editor.focus();
+  };
+
+  // Slide Studio decks live between these markers; the token after the opening
+  // marker is the serialized layout, so the studio can reopen and re-edit them.
+  const DECK_RE = /\/\/ >>> hilbert-slides (\S+)[\s\S]*?\/\/ <<< hilbert-slides\n?/;
+
+  const openSlideStudio = () => {
+    const m = editorRef.current?.getModel();
+    const match = m ? m.getValue().match(DECK_RE) : null;
+    setSlideDeckToken(match ? match[1] : null);
+    setShowSlideStudio(true);
+  };
+
+  const insertDeck = (code: string) => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (editor && model) {
+      const match = model.getValue().match(DECK_RE);
+      if (match && match.index !== undefined) {
+        const start = model.getPositionAt(match.index);
+        const end = model.getPositionAt(match.index + match[0].length);
+        editor.executeEdits('slides', [{
+          range: new monaco!.Range(start.lineNumber, start.column, end.lineNumber, end.column),
+          text: code,
+          forceMoveMarkers: true,
+        }]);
+        editor.focus();
+        return;
+      }
+    }
+    // Straight to the editor: the studio is still mounted (and capturing) when
+    // it hands the finished deck over.
+    insertCodeRaw(code);
+  };
+
+  const ensurePinit = () => {
+    const m = editorRef.current?.getModel();
+    if (m && !m.getValue().includes('@preview/pinit')) insertAtTop('#import "@preview/pinit:0.2.2": *\n');
+  };
+
+  const insertPinHighlight = () => {
+    ensurePinit();
+    insertCode('\nA simple #pin(1)highlighted phrase#pin(2) in the flow of text.\n#pinit-highlight(1, 2)\n#pinit-point-from(2)[And a note about it.]\n');
+  };
+
+  const insertPinArrow = () => {
+    ensurePinit();
+    insertCode('\nFrom here#pin(1) #h(6em) #pin(2)to there.\n#pinit-arrow(1, 2, end-dy: -0.4em)\n');
   };
 
   // Insert LaTeX (e.g. Wolfram TeXForm / sympy latex()) as rendered Typst math via
@@ -1808,6 +1871,7 @@ export default function App() {
 
   // Ensure a document-level set rule exists exactly once, then run a follow-up insert.
   const ensureRule = (marker: string, rule: string) => {
+    if (slideCaptureRef.current) { slideCaptureRef.current.ensure(marker, rule); return; }
     if (!activeTab) return;
     if (!activeTab.content.includes(marker)) {
       const editor = editorRef.current;
@@ -2392,6 +2456,10 @@ export default function App() {
   // can Tab through the blanks. Falls back to plain text if the snippet
   // controller isn't available.
   const insertSnippet = (snippet: string) => {
+    if (slideCaptureRef.current) {
+      slideCaptureRef.current.insert(snippet.replace(/\$\{\d+:([^}]*)\}/g, '$1').replace(/\$\{\d+\}/g, '').replace(/\$\d+/g, ''));
+      return;
+    }
     const editor = editorRef.current;
     if (!editor) return;
     editor.focus();
@@ -3212,6 +3280,9 @@ export default function App() {
     { category: 'Figures', title: 'Import Data (CSV/Excel/JSON)...', run: insertDataFile },
     { category: 'Figures', title: 'Code Block', hint: '⌘⇧B', run: insertCodeBlock },
     { category: 'Figures', title: 'Subfigures (side-by-side)...', run: insertSubfigures },
+    { category: 'Slides', title: 'Slide Studio (drag & drop deck builder)...', run: openSlideStudio },
+    { category: 'Slides', title: 'Pin highlight + arrow note (pinit)', run: insertPinHighlight },
+    { category: 'Slides', title: 'Pin arrow between two words (pinit)', run: insertPinArrow },
     { category: 'Plots', title: 'Plot Studio (2D · data · 3D · Python)...', run: () => setShowPlotStudio(true) },
     { category: 'Plots', title: 'cetz Canvas (shapes & grid)...', run: () => setShowDiagramBuilder(true) },
     { category: 'Plots', title: 'Commutative Diagram (quiver)...', run: () => setShowQuiver(true) },
@@ -3226,7 +3297,7 @@ export default function App() {
     { category: 'References', title: 'Cross-reference (Internal)...', run: insertCrossRef },
     { category: 'References', title: 'Label...', run: insertLabel },
     { category: 'References', title: 'Reference & Label Manager...', run: () => setShowRefManager(true) },
-    { category: 'References', title: 'Citations & Bibliography (DOI/arXiv)...', run: () => setShowBibManager(true) },
+    { category: 'References', title: 'Citations & Bibliography (DOI/arXiv/Zotero)...', run: () => setShowBibManager(true) },
     { category: 'Format', title: 'Bold', hint: '⌘B', run: () => wrapSelection('*', '*') },
     { category: 'Format', title: 'Italic', hint: '⌘I', run: () => wrapSelection('_', '_') },
     { category: 'Format', title: 'Underline', run: () => wrapSelection('#underline[', ']') },
@@ -3429,7 +3500,7 @@ export default function App() {
                       <div className="dropdown-item" onClick={() => { insertLabel(); setActiveMenu(null); }}>Label...</div>
                       <div className="dropdown-divider"></div>
                       <div className="dropdown-item" onClick={() => { setShowRefManager(true); setActiveMenu(null); }}>Reference &amp; Label Manager...</div>
-                      <div className="dropdown-item" onClick={() => { setShowBibManager(true); setActiveMenu(null); }}>Citations &amp; Bibliography (DOI/arXiv)...</div>
+                      <div className="dropdown-item" onClick={() => { setShowBibManager(true); setActiveMenu(null); }}>Citations &amp; Bibliography (DOI/arXiv/Zotero)...</div>
                     </div>
                   </div>
                 </div>
@@ -3461,6 +3532,21 @@ export default function App() {
                   <div className="dropdown-item" onClick={() => { wrapSelection('#strike[', ']'); setActiveMenu(null); }}>Strikethrough (text)</div>
                   <div className="dropdown-item" onClick={() => { insertTracking(); setActiveMenu(null); }}>Letter Spacing...</div>
                   <div className="dropdown-item" onClick={() => { insertCode('~'); setActiveMenu(null); }}>Non-breaking Space  (~)</div>
+                </div>
+              )}
+            </div>
+            <div {...menuProps('slides')}>
+              Slides
+              {activeMenu === 'slides' && (
+                <div className="dropdown">
+                  <div className="dropdown-item" onClick={() => { openSlideStudio(); setActiveMenu(null); }}>
+                    Slide Studio (drag &amp; drop deck builder)...
+                    <span style={{ marginLeft: 'auto', fontSize: '0.6rem', fontWeight: 600, padding: '1px 6px', borderRadius: 999, background: 'rgba(217,119,6,0.14)', color: '#d97706', border: '1px solid rgba(217,119,6,0.4)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>experimental</span>
+                  </div>
+                  <div className="dropdown-divider"></div>
+                  <div className="dropdown-header">Pin annotations (pinit)</div>
+                  <div className="dropdown-item" onClick={() => { insertPinHighlight(); setActiveMenu(null); }}>Highlight words + arrow note</div>
+                  <div className="dropdown-item" onClick={() => { insertPinArrow(); setActiveMenu(null); }}>Arrow between two words</div>
                 </div>
               )}
             </div>
@@ -3868,7 +3954,7 @@ export default function App() {
                 if (ext === 'excalidraw') {
                   return (
                     <Boundary name="Whiteboard" onClose={() => { const rem = tabs.filter(t => t.path !== activeTabPath); setTabs(rem); setActiveTabPath(rem.length ? rem[rem.length - 1].path : ''); }}>
-                    <ExcalidrawEditor
+                    <Suspense fallback={<div className="empty-state">Loading whiteboard...</div>}><ExcalidrawEditor
                       path={activeTabPath}
                       initialContent={activeTab.content}
                       onSave={async (jsonContent, svgBlob) => {
@@ -3881,7 +3967,7 @@ export default function App() {
                         await fetch(`${API}/workspace/upload?path=${encodeURIComponent(svgPath)}`, { method: 'POST', body: svgBlob, headers: { 'Content-Type': 'application/octet-stream' } });
                         fetchTree(); // Refresh tree so the SVG appears
                       }}
-                    />
+                    /></Suspense>
                     </Boundary>
                   );
                 }
@@ -4017,6 +4103,23 @@ export default function App() {
       {showTemplateInstaller && <TemplateInstaller onClose={() => setShowTemplateInstaller(false)} onInsert={handleInitTemplate} onUseBuiltin={handleUseBuiltin} />}
       {showDiagramBuilder && <DiagramBuilder onClose={() => setShowDiagramBuilder(false)} onInsert={(code) => { insertCode(code); setShowDiagramBuilder(false); }}
         onSaveFile={async (filename, content) => { await fetch(`${API}/workspace/file?path=${encodeURIComponent(filename)}`, { method: 'POST', body: content, headers: { 'Content-Type': 'text/plain' } }); await fetchTree(); }} />}
+      {showSlideStudio && <Boundary name="Slide Studio" onClose={() => { slideCaptureRef.current = null; setShowSlideStudio(false); }}><Suspense fallback={null}><SlideStudio
+        onClose={() => setShowSlideStudio(false)}
+        existing={slideDeckToken}
+        workspaceImages={workspaceImages}
+        onInsert={(code) => { insertDeck(code); setShowSlideStudio(false); }}
+        registerCapture={registerSlideCapture}
+        onOpenTool={(key) => {
+          if (key === 'equation') setShowEqGallery(true);
+          else if (key === 'physics') setShowPhysics(true);
+          else if (key === 'matrix') setShowMatrixStudio(true);
+          else if (key === 'feynman') setShowFeynman(true);
+          else if (key === 'cetz') setShowDiagramBuilder(true);
+          else if (key === 'quiver') setShowQuiver(true);
+          else if (key === 'plot') setShowPlotStudio(true);
+          else if (key === 'flowchart') setShowFlowchart(true);
+        }}
+      /></Suspense></Boundary>}
       {showFeynman && <Suspense fallback={null}><FeynmanBuilder onClose={() => setShowFeynman(false)} onInsert={(code) => { insertCode(code); setShowFeynman(false); }} /></Suspense>}
       {showEqGallery && <Suspense fallback={null}><EquationGallery onClose={() => setShowEqGallery(false)} onInsert={insertEqTemplate} /></Suspense>}
       {showPhysics && <Suspense fallback={null}><PhysicsGallery onClose={() => setShowPhysics(false)} onInsert={insertPhysicsTemplate} /></Suspense>}

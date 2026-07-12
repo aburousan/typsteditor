@@ -12,7 +12,10 @@ import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const assetsDir = join(process.cwd(), 'dist', 'assets');
-const GOOGLE_API_KEY = /AIza[0-9A-Za-z_-]{35}/g;
+const BUNDLED_CREDENTIALS = [
+  /AIza[0-9A-Za-z_-]{35}/g,
+  /AKIA[0-9A-Z]{16}/g,
+];
 
 let files = 0;
 try {
@@ -20,8 +23,12 @@ try {
     if (!name.endsWith('.js')) continue;
     const path = join(assetsDir, name);
     const src = readFileSync(path, 'utf8');
-    if (GOOGLE_API_KEY.test(src)) {
-      writeFileSync(path, src.replace(GOOGLE_API_KEY, 'bundled-third-party-key-removed'));
+    let scrubbed = src;
+    for (const pattern of BUNDLED_CREDENTIALS) {
+      scrubbed = scrubbed.replace(pattern, 'bundled-third-party-key-removed');
+    }
+    if (scrubbed !== src) {
+      writeFileSync(path, scrubbed);
       files++;
     }
   }
@@ -29,4 +36,4 @@ try {
   console.warn('strip-bundled-secrets: skipped —', e.message);
   process.exit(0); // never fail the build over this
 }
-console.log(`strip-bundled-secrets: neutralized bundled Google API keys in ${files} file(s).`);
+console.log(`strip-bundled-secrets: neutralized bundled third-party credentials in ${files} file(s).`);

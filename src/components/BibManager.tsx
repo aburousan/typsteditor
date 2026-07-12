@@ -11,6 +11,14 @@ const BIB = 'refs.bib';
 
 type Entry = { key: string; title: string; author: string; year: string };
 
+// Typst citation keys (labels) only allow letters, digits, _ - . and :.
+// Better BibTeX happily generates keys like murshidNeutronStars$fRT$2024 when
+// a title contains math, and a $ inside @key flips Typst into math mode — so
+// every key that passes through here gets stripped to the legal charset.
+const sanitizeKey = (k: string) => k.replace(/[^A-Za-z0-9_\-.:]/g, '') || 'ref';
+const sanitizeBibKeys = (text: string) =>
+  text.replace(/(@\w+\s*\{\s*)([^,\s]+)(\s*,)/g, (_, pre, key, post) => pre + sanitizeKey(key) + post);
+
 function parseBib(text: string): Entry[] {
   const out: Entry[] = [];
   for (const m of text.matchAll(/@\w+\s*\{\s*([^,\s]+)\s*,([\s\S]*?)\n\}/g)) {
@@ -37,6 +45,9 @@ export default function BibManager({ onClose, onCite, onEnsureBib, onChanged }: 
   const [draft, setDraft] = useState<{ key: string; bibtex: string } | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [savedMsg, setSavedMsg] = useState('');
+  const [zStatus, setZStatus] = useState<'checking' | 'ok' | 'off'>('checking');
+  const [zMsg, setZMsg] = useState('');
+  const [zBusy, setZBusy] = useState<'' | 'pick' | 'import'>('');
 
   const loadBib = async () => {
     try {
@@ -53,7 +64,7 @@ export default function BibManager({ onClose, onCite, onEnsureBib, onChanged }: 
       const res = await fetch(`${API}/bib/fetch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: query }) });
       const data = await res.json();
       if (!res.ok) setError(data.error || 'Lookup failed.');
-      else setDraft({ key: data.key, bibtex: data.bibtex });
+      else setDraft({ key: sanitizeKey(data.key), bibtex: sanitizeBibKeys(data.bibtex) });
     } catch { setError('Could not reach the local server.'); } finally { setLoading(false); }
   };
 
@@ -75,6 +86,86 @@ export default function BibManager({ onClose, onCite, onEnsureBib, onChanged }: 
       setSavedMsg(`Added "${draft.key}" to ${BIB}.`);
       setDraft(null); setQuery('');
     } catch { setError('Could not write refs.bib.'); }
+  };
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch(`${API}/zotero/ping`);
+        const d = await r.json();
+        setZStatus(d.ok ? 'ok' : 'off');
+        setZMsg(d.ok ? '' : d.error || '');
+      } catch { setZStatus('off'); setZMsg('Could not reach the local server.'); }
+    })();
+  }, []);
+
+  // Append any entries whose keys aren't in refs.bib yet; returns what it saw.
+  // Also heals keys already in refs.bib that Typst can't cite (e.g. with $).
+  const mergeIntoBib = async (bibtex: string) => {
+    const cur = await fetch(`${API}/workspace/file?path=${BIB}`);
+    const raw = cur.ok ? await cur.text() : '';
+    const existing = sanitizeBibKeys(raw);
+    const have = new Set(parseBib(existing).map(e => e.key));
+    const found = sanitizeBibKeys(bibtex).match(/@\w+\s*\{[\s\S]*?\n\}/g) || [];
+    const fresh: string[] = [];
+    let total = 0;
+    for (const ent of found) {
+      const km = ent.match(/@\w+\s*\{\s*([^,\s]+)\s*,/);
+      if (!km) continue;
+      total++;
+      if (!have.has(km[1])) { fresh.push(ent.trim()); have.add(km[1]); }
+    }
+    if (fresh.length || existing !== raw) {
+      const parts = existing.trim() ? [existing.trimEnd()] : [];
+      if (fresh.length) parts.push(fresh.join('\n\n'));
+      const next = parts.join('\n\n') + '\n';
+      await fetch(`${API}/workspace/file?path=${BIB}`, { method: 'POST', body: next, headers: { 'Content-Type': 'text/plain' } });
+    }
+    return { added: fresh.length, total };
+  };
+
+  const readErr = (text: string, fallback: string) => {
+    try { return JSON.parse(text).error || fallback; } catch { return fallback; }
+  };
+
+  // Open Zotero's own search popup; picked papers land in refs.bib and are
+  // cited at the cursor in one go.
+  const zoteroPick = async () => {
+    setZBusy('pick'); setError(''); setSavedMsg('');
+    try {
+      const r = await fetch(`${API}/zotero/pick`);
+      const text = await r.text();
+      if (!r.ok) { setError(readErr(text, 'Zotero picker failed.')); return; }
+      const keys = [...text.matchAll(/\{([^{}]+)\}/g)]
+        .flatMap(m => m[1].split(','))
+        .map(s => s.trim())
+        .filter(Boolean);
+      if (!keys.length) { setSavedMsg('Nothing picked in Zotero.'); return; }
+      const ex = await fetch(`${API}/zotero/export`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ citekeys: keys }) });
+      const bib = await ex.text();
+      if (!ex.ok) { setError(readErr(bib, 'Zotero export failed.')); return; }
+      await mergeIntoBib(bib);
+      await loadBib();
+      onChanged?.();
+      onCite(keys.map(sanitizeKey).join(' @'));
+      onClose();
+    } catch { setError('Zotero pick failed.'); } finally { setZBusy(''); }
+  };
+
+  const zoteroImport = async () => {
+    setZBusy('import'); setError(''); setSavedMsg('');
+    try {
+      const r = await fetch(`${API}/zotero/library`);
+      const text = await r.text();
+      if (!r.ok) { setError(readErr(text, 'Library export failed.')); return; }
+      const { added, total } = await mergeIntoBib(text);
+      await loadBib();
+      onChanged?.();
+      if (added) onEnsureBib();
+      setSavedMsg(added
+        ? `Imported ${added} new ${added > 1 ? 'entries' : 'entry'} from Zotero (${total} in the library).`
+        : `All ${total} Zotero entries are already in ${BIB}.`);
+    } catch { setError('Zotero import failed.'); } finally { setZBusy(''); }
   };
 
   const remove = async (key: string) => {
@@ -108,6 +199,28 @@ export default function BibManager({ onClose, onCite, onEnsureBib, onChanged }: 
           </div>
           {error && <div className="form-hint" style={{ color: '#fca5a5' }}>{error}</div>}
           {savedMsg && <div className="form-hint" style={{ color: '#4ade80' }}>{savedMsg}</div>}
+
+          <div style={{ background: 'var(--bg-color)', borderRadius: 8, padding: '10px 12px', margin: '8px 0' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>Zotero</span>
+              <span style={{ fontSize: 11, color: zStatus === 'ok' ? '#4ade80' : 'var(--text-muted)' }}>
+                {zStatus === 'checking' ? 'checking…' : zStatus === 'ok' ? '● connected' : '○ not connected'}
+              </span>
+              <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                <button className="btn-primary" style={{ padding: '4px 10px', fontSize: 12 }} disabled={zStatus !== 'ok' || !!zBusy} onClick={zoteroPick}>
+                  {zBusy === 'pick' ? 'Waiting for Zotero…' : 'Pick & cite…'}
+                </button>
+                <button className="btn-ghost" style={{ padding: '4px 10px', fontSize: 12 }} disabled={zStatus !== 'ok' || !!zBusy} onClick={zoteroImport}>
+                  {zBusy === 'import' ? 'Importing…' : 'Import entire library'}
+                </button>
+              </span>
+            </div>
+            <div className="form-hint" style={{ marginTop: 6, marginBottom: 0 }}>
+              {zStatus === 'ok'
+                ? <>Pick &amp; cite opens Zotero's search popup — the chosen papers are added to <code>{BIB}</code> and cited at the cursor.</>
+                : <>{zMsg} Needs the Zotero desktop app running with the <b>Better BibTeX</b> plugin (<code>retorque.re/zotero-better-bibtex</code>).</>}
+            </div>
+          </div>
 
           {draft && (
             <div style={{ background: 'var(--bg-color)', borderRadius: 8, padding: 12, margin: '4px 0 8px' }}>

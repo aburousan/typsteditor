@@ -354,9 +354,9 @@ npm run dev             # Vite UI on http://localhost:5173, backend on http://12
 ```
 
 `npm run dev` serves the UI with Vite and starts the Rust backend (the Tauri binary in
-headless mode) on port 3001, so it needs the sibling `../typst-editor-tauri` checkout
-and a Rust toolchain. To build the desktop app, run `cargo tauri build` in
-`../typst-editor-tauri`.
+headless mode) on port 3001. The backend lives under `src-tauri/`, so no sibling
+checkout or manual frontend copy is required. Run `npm run desktop` to build the
+frontend and open the complete native application.
 
 On Windows, run from source with:
 

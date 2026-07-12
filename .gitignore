@@ -34,6 +34,10 @@ workspace/sandbox/
 /*stress*.cjs
 workspace/.previews/
 release/
+releases/
+src-tauri/target/
+src-tauri/target-linux/
+src-tauri/workspace/
 
 # Personal documents living in the local workspace (only the shipped demo
 # files example.typ/showcase.typ/main.typ/refs.bib are tracked)

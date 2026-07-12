@@ -13,7 +13,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 
 const BIN = process.env.BIN
-  || join(process.cwd(), '../typst-editor-tauri/src-tauri/target/release/typst-editor');
+  || join(process.cwd(), 'src-tauri/target/release/typst-editor');
 const ROOT = join(tmpdir(), 'hilbert-bench');
 const PORT = 3222;
 
