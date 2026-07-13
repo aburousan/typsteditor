@@ -8,6 +8,7 @@
 // compile time, and RSS (start, and after hammering it). Writes bench-results.json.
 
 import { spawn, execSync } from 'child_process';
+import { randomBytes } from 'crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -16,6 +17,13 @@ const BIN = process.env.BIN
   || join(process.cwd(), 'src-tauri/target/release/typst-editor');
 const ROOT = join(tmpdir(), 'hilbert-bench');
 const PORT = 3222;
+const API_TOKEN = randomBytes(32).toString('base64url');
+const nativeFetch = globalThis.fetch;
+globalThis.fetch = (input, init = {}) => {
+  const headers = new Headers(init.headers);
+  headers.set('Authorization', `Bearer ${API_TOKEN}`);
+  return nativeFetch(input, { ...init, headers });
+};
 
 const SIZES = [
   { name: 'Tiny',   chapters: 3,    refs: 5 },
@@ -68,7 +76,7 @@ for (const size of SIZES) {
   const t0 = now();
   const proc = spawn(BIN, ['--headless'], {
     cwd: ws, stdio: 'ignore',
-    env: { ...process.env, PORT: String(PORT), TYPST_WORKSPACE: ws },
+    env: { ...process.env, PORT: String(PORT), TYPST_WORKSPACE: ws, HILBERT_API_TOKEN: API_TOKEN },
   });
   await waitReady();
   const startup = now() - t0;

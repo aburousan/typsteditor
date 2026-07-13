@@ -79,10 +79,15 @@ impl AppState {
     pub fn new(workspace: PathBuf, dist: Option<PathBuf>) -> Self {
         let mut token_bytes = [0u8; 32];
         getrandom::fill(&mut token_bytes).expect("operating-system randomness for API token");
+        let generated_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes);
+        let api_token = std::env::var("HILBERT_API_TOKEN")
+            .ok()
+            .filter(|token| token.len() >= 32)
+            .unwrap_or(generated_token);
         AppState {
             workspace: RwLock::new(workspace),
             dist,
-            api_token: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes),
+            api_token,
             interpreters: detect_interpreters(),
             allow_exec: std::env::var("ALLOW_CODE_EXECUTION").ok().as_deref() != Some("0"),
             exec_timeout_ms: std::env::var("EXEC_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(45000),

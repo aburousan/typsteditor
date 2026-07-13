@@ -154,8 +154,15 @@ For testing (or Docker-style use) the same binary can run the backend alone,
 like `node server.js` did:
 
 ```bash
-./target/release/typst-editor --headless        # PORT, TYPST_WORKSPACE, TYPST_DIST respected
+export HILBERT_API_TOKEN="$(openssl rand -hex 32)"
+./target/release/typst-editor --headless
+curl -H "Authorization: Bearer $HILBERT_API_TOKEN" http://127.0.0.1:3001/workspace
 ```
+
+`PORT`, `TYPST_WORKSPACE`, and `TYPST_DIST` are also respected. Use a token of
+at least 32 characters for non-browser headless clients. The token is never
+printed or written to disk. Vite development obtains its temporary token from
+an origin-restricted endpoint that is compiled out of release builds.
 
 ## Security model
 
@@ -163,6 +170,8 @@ Same posture as the original (local, single-user), with extra hardening added
 in the Rust backend:
 
 - Binds to `127.0.0.1` only.
+- **Per-launch bearer token** — API routes reject requests that do not carry
+  the in-memory token supplied privately to the desktop webview.
 - **Host-header check** — requests whose `Host` isn't `127.0.0.1`/`localhost`
   are rejected (blocks DNS-rebinding, where a hostile domain resolves to
   loopback to reach this server from a victim's browser).
