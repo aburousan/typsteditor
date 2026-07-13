@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
 import { API } from './api';
 import Editor, { useMonaco } from '@monaco-editor/react';
-import ImageEditor from './ImageEditor';
 import { setupTypstLanguage, setWorkspaceImages } from './typstMonaco';
 import { useProofread } from './proofread';
 import ProofreadPanel from './components/ProofreadPanel';
@@ -10,17 +9,8 @@ import type { PdfHandle } from './components/PdfPreview';
 import { PackageInstaller } from './PackageInstaller';
 import { TemplateInstaller } from './TemplateInstaller';
 import type { BuiltinTemplate } from './builtinTemplates';
-import DiagramBuilder from './components/DiagramBuilder';
-import FigureBuilder from './components/FigureBuilder';
-import QuiverDiagram from './components/QuiverDiagram';
-import EditSettings from './components/EditSettings';
-import SymbolPicker from './components/SymbolPicker';
-import DriveSyncModal from './components/DriveSyncModal';
-import AppSettingsModal from './components/AppSettingsModal';
 import InputModal, { type InputModalConfig } from './components/InputModal';
-import CodeRunnerModal from './components/CodeRunnerModal';
 import CommandPalette, { type PaletteCommand } from './components/CommandPalette';
-import SaveAsModal from './components/SaveAsModal';
 import PdfPreview from './components/PdfPreview';
 // Loaded on demand: pulls in all of three.js, which nothing else needs.
 const Plot3DStudio = lazy(() => import('./components/Plot3DStudio'));
@@ -35,13 +25,23 @@ const MatrixStudio = lazy(() => import('./components/MatrixStudio'));
 const ImagePlacer = lazy(() => import('./components/ImagePlacer'));
 const SlideStudio = lazy(() => import('./components/SlideStudio'));
 const ExcalidrawEditor = lazy(() => import('./ExcalidrawEditor'));
-import SymbolDraw from './components/SymbolDraw';
+const ImageEditor = lazy(() => import('./ImageEditor'));
+const DiagramBuilder = lazy(() => import('./components/DiagramBuilder'));
+const FigureBuilder = lazy(() => import('./components/FigureBuilder'));
+const QuiverDiagram = lazy(() => import('./components/QuiverDiagram'));
+const EditSettings = lazy(() => import('./components/EditSettings'));
+const SymbolPicker = lazy(() => import('./components/SymbolPicker'));
+const DriveSyncModal = lazy(() => import('./components/DriveSyncModal'));
+const AppSettingsModal = lazy(() => import('./components/AppSettingsModal'));
+const CodeRunnerModal = lazy(() => import('./components/CodeRunnerModal'));
+const SaveAsModal = lazy(() => import('./components/SaveAsModal'));
+const SymbolDraw = lazy(() => import('./components/SymbolDraw'));
+const DataImportModal = lazy(() => import('./components/DataImportModal'));
+const RefManager = lazy(() => import('./components/RefManager'));
+const BibManager = lazy(() => import('./components/BibManager'));
 import Boundary from './components/Boundary';
 import Toaster from './components/Toaster';
-import DataImportModal from './components/DataImportModal';
 import { notify } from './notify';
-import RefManager from './components/RefManager';
-import BibManager from './components/BibManager';
 import './index.css';
 
 const SURFACE_3D_TEMPLATE = `import matplotlib
@@ -3914,7 +3914,7 @@ export default function App() {
                 const rawSrc = `${API}/workspace/raw?path=${encodeURIComponent(activeTabPath)}&v=${tabs.find(t => t.path === activeTabPath)?.content.length || 0}`;
                 if (RASTER_EXT.includes(ext)) {
                   return (
-                    <ImageEditor
+                    <Suspense fallback={null}><ImageEditor
                       path={activeTabPath}
                       initialSrc={rawSrc}
                       onSave={async (buf) => {
@@ -3922,7 +3922,7 @@ export default function App() {
                          // Hack to trigger a reload of the image: update the tab's "content" string length which we use as a version cache-buster
                          setTabs(prev => prev.map(t => t.path === activeTabPath ? { ...t, content: t.content + ' ' } : t));
                       }}
-                    />
+                    /></Suspense>
                   );
                 }
                 if (ext === 'svg') {
@@ -4101,8 +4101,8 @@ export default function App() {
         setShowPackageInstaller(false);
       }} />}
       {showTemplateInstaller && <TemplateInstaller onClose={() => setShowTemplateInstaller(false)} onInsert={handleInitTemplate} onUseBuiltin={handleUseBuiltin} />}
-      {showDiagramBuilder && <DiagramBuilder onClose={() => setShowDiagramBuilder(false)} onInsert={(code) => { insertCode(code); setShowDiagramBuilder(false); }}
-        onSaveFile={async (filename, content) => { await fetch(`${API}/workspace/file?path=${encodeURIComponent(filename)}`, { method: 'POST', body: content, headers: { 'Content-Type': 'text/plain' } }); await fetchTree(); }} />}
+      {showDiagramBuilder && <Suspense fallback={null}><DiagramBuilder onClose={() => setShowDiagramBuilder(false)} onInsert={(code) => { insertCode(code); setShowDiagramBuilder(false); }}
+        onSaveFile={async (filename, content) => { await fetch(`${API}/workspace/file?path=${encodeURIComponent(filename)}`, { method: 'POST', body: content, headers: { 'Content-Type': 'text/plain' } }); await fetchTree(); }} /></Suspense>}
       {showSlideStudio && <Boundary name="Slide Studio" onClose={() => { slideCaptureRef.current = null; setShowSlideStudio(false); }}><Suspense fallback={null}><SlideStudio
         onClose={() => setShowSlideStudio(false)}
         existing={slideDeckToken}
@@ -4150,16 +4150,16 @@ export default function App() {
           </div>
         </div>
       )}
-      {showFigureBuilder && <FigureBuilder onClose={() => setShowFigureBuilder(false)} onInsert={(code) => { insertCode(code); setShowFigureBuilder(false); }} />}
-      {showEditSettings && <EditSettings onClose={() => setShowEditSettings(false)} editorRef={editorRef} monaco={monaco} />}
-      {showDriveSync && <DriveSyncModal onClose={() => setShowDriveSync(false)} projectName={projectName} />}
-      {showAppSettings && <AppSettingsModal onClose={() => setShowAppSettings(false)}
+      {showFigureBuilder && <Suspense fallback={null}><FigureBuilder onClose={() => setShowFigureBuilder(false)} onInsert={(code) => { insertCode(code); setShowFigureBuilder(false); }} /></Suspense>}
+      {showEditSettings && <Suspense fallback={null}><EditSettings onClose={() => setShowEditSettings(false)} editorRef={editorRef} monaco={monaco} /></Suspense>}
+      {showDriveSync && <Suspense fallback={null}><DriveSyncModal onClose={() => setShowDriveSync(false)} projectName={projectName} /></Suspense>}
+      {showAppSettings && <Suspense fallback={null}><AppSettingsModal onClose={() => setShowAppSettings(false)}
         theme={theme} onTheme={setTheme}
         fontSize={editorFontSize} onFontSize={setEditorFontSize}
-        compileDelay={compileDelay} onCompileDelay={setCompileDelay} />}
-      {showQuiver && <QuiverDiagram onClose={() => setShowQuiver(false)} onInsert={insertQuiverDiagram} />}
+        compileDelay={compileDelay} onCompileDelay={setCompileDelay} /></Suspense>}
+      {showQuiver && <Suspense fallback={null}><QuiverDiagram onClose={() => setShowQuiver(false)} onInsert={insertQuiverDiagram} /></Suspense>}
       {inputModal && <InputModal {...inputModal} onClose={() => setInputModal(null)} />}
-      {showDataImport && <DataImportModal onClose={() => setShowDataImport(false)} onImport={handleDataImport} />}
+      {showDataImport && <Suspense fallback={null}><DataImportModal onClose={() => setShowDataImport(false)} onImport={handleDataImport} /></Suspense>}
       {confirmModal && (
         <div className="modal-overlay" onClick={() => { confirmModal.resolve(false); setConfirmModal(null); }}>
           <div className="modal-content" style={{ width: '420px' }} onClick={e => e.stopPropagation()}
@@ -4180,13 +4180,13 @@ export default function App() {
           </div>
         </div>
       )}
-      {codeRunner && <Boundary name="Code Runner" onClose={() => setCodeRunner(null)}><CodeRunnerModal {...codeRunner} onClose={() => setCodeRunner(null)} onInsert={(code) => { insertCode(code); setCodeRunner(null); }} onInsertEquation={(latex, codeBlock) => { insertEquationFromLatex(latex, codeBlock); setCodeRunner(null); }} onChanged={fetchTree} /></Boundary>}
-      {showSaveAs && activeTab && <SaveAsModal onClose={() => setShowSaveAs(false)} fileName={activeTabPath} content={activeTab.content} pdfUrl={pdfUrl} projectName={projectName} mainFile={currentMain} />}
+      {codeRunner && <Boundary name="Code Runner" onClose={() => setCodeRunner(null)}><Suspense fallback={null}><CodeRunnerModal {...codeRunner} onClose={() => setCodeRunner(null)} onInsert={(code) => { insertCode(code); setCodeRunner(null); }} onInsertEquation={(latex, codeBlock) => { insertEquationFromLatex(latex, codeBlock); setCodeRunner(null); }} onChanged={fetchTree} /></Suspense></Boundary>}
+      {showSaveAs && activeTab && <Suspense fallback={null}><SaveAsModal onClose={() => setShowSaveAs(false)} fileName={activeTabPath} content={activeTab.content} pdfUrl={pdfUrl} projectName={projectName} mainFile={currentMain} /></Suspense>}
       {showPlot3D && <Boundary name="3D Plot Studio" onClose={() => setShowPlot3D(false)}><Suspense fallback={null}><Plot3DStudio onClose={() => setShowPlot3D(false)} onInsert={(code) => { insertCode(code); setShowPlot3D(false); fetchTree(); }} /></Suspense></Boundary>}
       {showPlotStudio && <Boundary name="Plot Studio" onClose={() => setShowPlotStudio(false)}><Suspense fallback={null}><PlotStudio onClose={() => setShowPlotStudio(false)} onInsert={(code) => insertCode(code)} onEnsureSetup={ensureSetup} onOpenInteractive={() => setShowPlot3D(true)} onOpenPython={() => setCodeRunner({ initialLang: 'python', initialCode: SURFACE_3D_TEMPLATE })} /></Suspense></Boundary>}
-      {showSymbolDraw && <SymbolDraw onClose={() => setShowSymbolDraw(false)} onInsert={(name) => { insertCode(name + ' '); setShowSymbolDraw(false); }} />}
-      {showRefManager && activeTab && <RefManager content={activeTab.content} onClose={() => setShowRefManager(false)} onJump={jumpToLine} onInsertRef={(name) => insertCode(`@${name}`)} />}
-      {showBibManager && <BibManager onClose={() => setShowBibManager(false)} onCite={(key) => { insertCode(`@${key}`); ensureBibliography(); }} onEnsureBib={ensureBibliography} onChanged={fetchTree} />}
+      {showSymbolDraw && <Suspense fallback={null}><SymbolDraw onClose={() => setShowSymbolDraw(false)} onInsert={(name) => { insertCode(name + ' '); setShowSymbolDraw(false); }} /></Suspense>}
+      {showRefManager && activeTab && <Suspense fallback={null}><RefManager content={activeTab.content} onClose={() => setShowRefManager(false)} onJump={jumpToLine} onInsertRef={(name) => insertCode(`@${name}`)} /></Suspense>}
+      {showBibManager && <Suspense fallback={null}><BibManager onClose={() => setShowBibManager(false)} onCite={(key) => { insertCode(`@${key}`); ensureBibliography(); }} onEnsureBib={ensureBibliography} onChanged={fetchTree} /></Suspense>}
       
       {showHistoryModal && (
         <div className="modal-overlay" onClick={() => setShowHistoryModal(false)}>
@@ -4213,7 +4213,7 @@ export default function App() {
         </div>
       )}
 
-      {showSymbolPicker && <SymbolPicker onClose={() => setShowSymbolPicker(false)} onInsert={(code) => { insertCode(code + ' '); setShowSymbolPicker(false); }} />}
+      {showSymbolPicker && <Suspense fallback={null}><SymbolPicker onClose={() => setShowSymbolPicker(false)} onInsert={(code) => { insertCode(code + ' '); setShowSymbolPicker(false); }} /></Suspense>}
 
       {contextMenu && (
         <div className="context-menu dropdown" style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, zIndex: 9999, display: 'block' }} onClick={e => e.stopPropagation()}>
