@@ -18,7 +18,8 @@ type TypstEl = { id: number, type: 'typst', x: number, y: number, w: number, cod
 type HlEl = { id: number, type: 'hl', x: number, y: number, w: number, h: number, color: string };
 type ShapeEl = { id: number, type: 'rect' | 'ellipse', x: number, y: number, w: number, h: number, fill: string, stroke: string, sw: number, radius: number };
 type ConnEl = { id: number, type: 'conn', kind: 'arrow' | 'double' | 'line', x1: number, y1: number, x2: number, y2: number, color: string, th: number };
-type CurveEl = { id: number, type: 'curve', pts: Pt[], color: string, th: number, closed: boolean, fill: string };
+type CurveArrow = 'none' | 'start' | 'end' | 'both';
+type CurveEl = { id: number, type: 'curve', pts: Pt[], color: string, th: number, closed: boolean, fill: string, arrows?: CurveArrow };
 type El = TextEl | MathEl | ImgEl | TypstEl | HlEl | ShapeEl | ConnEl | CurveEl;
 type Slide = { id: number, fill: string, els: El[] };
 type Tool = 'select' | 'text' | 'math' | 'image' | 'rect' | 'ellipse' | 'hl' | 'arrow' | 'double' | 'line' | 'curve';
@@ -69,6 +70,12 @@ const bounds = (e: El): { x: number, y: number, w: number, h: number } => {
   if (e.type === 'image') return { x: e.x, y: e.y, w: e.w, h: imgH(e) };
   if (e.type === 'typst') return { x: e.x, y: e.y, w: e.w, h: typstH(e) };
   return { x: e.x, y: e.y, w: e.w, h: e.h };
+};
+
+const translateEl = (e: El, dx: number, dy: number): El => {
+  if (e.type === 'conn') return { ...e, x1: e.x1 + dx, y1: e.y1 + dy, x2: e.x2 + dx, y2: e.y2 + dy };
+  if (e.type === 'curve') return { ...e, pts: e.pts.map(p => ({ x: p.x + dx, y: p.y + dy })) };
+  return { ...e, x: e.x + dx, y: e.y + dy };
 };
 
 // Catmull-Rom spline through the clicked points, expressed as cubic Bézier
@@ -184,6 +191,55 @@ const TEMPLATES: { name: string, make: () => Slide }[] = [
       ],
     }),
   },
+  {
+    name: 'Agenda', make: () => ({
+      id: nid(), fill: '#f8fafc', els: [
+        { id: nid(), type: 'text', x: 56, y: 40, w: 730, size: 34, color: '#0f172a', align: 'left', text: '= Today’s roadmap' },
+        { id: nid(), type: 'rect', x: 58, y: 116, w: 222, h: 230, fill: '#ede9fe', stroke: '#c4b5fd', sw: 1.2, radius: 12 },
+        { id: nid(), type: 'rect', x: 310, y: 116, w: 222, h: 230, fill: '#dbeafe', stroke: '#93c5fd', sw: 1.2, radius: 12 },
+        { id: nid(), type: 'rect', x: 562, y: 116, w: 222, h: 230, fill: '#dcfce7', stroke: '#86efac', sw: 1.2, radius: 12 },
+        { id: nid(), type: 'text', x: 78, y: 142, w: 182, size: 22, color: '#6d28d9', align: 'left', text: '*01*\n\nMotivation\n\nWhy this problem matters' },
+        { id: nid(), type: 'text', x: 330, y: 142, w: 182, size: 22, color: '#1d4ed8', align: 'left', text: '*02*\n\nMethod\n\nHow we approached it' },
+        { id: nid(), type: 'text', x: 582, y: 142, w: 182, size: 22, color: '#047857', align: 'left', text: '*03*\n\nResults\n\nWhat we learned' },
+      ],
+    }),
+  },
+  {
+    name: 'Image + caption', make: () => ({
+      id: nid(), fill: '#ffffff', els: [
+        { id: nid(), type: 'text', x: 52, y: 34, w: 740, size: 32, color: '#111827', align: 'left', text: '= Visual evidence' },
+        { id: nid(), type: 'rect', x: 52, y: 104, w: 500, h: 280, fill: '#f8fafc', stroke: '#94a3b8', sw: 1.5, radius: 8 },
+        { id: nid(), type: 'text', x: 122, y: 224, w: 360, size: 18, color: '#64748b', align: 'center', text: 'Add an image with the Image tool' },
+        { id: nid(), type: 'rect', x: 582, y: 104, w: 210, h: 270, fill: '#f1f5f9', stroke: '#cbd5e1', sw: 1, radius: 10 },
+        { id: nid(), type: 'text', x: 606, y: 132, w: 162, size: 19, color: '#334155', align: 'left', text: '*What to notice*\n\n- First observation\n- Second observation\n- Main takeaway' },
+      ],
+    }),
+  },
+  {
+    name: 'Quote / key message', make: () => ({
+      id: nid(), fill: '#0f172a', els: [
+        { id: nid(), type: 'rect', x: 72, y: 92, w: 7, h: 276, fill: '#38bdf8', stroke: '#38bdf8', sw: 0, radius: 3 },
+        { id: nid(), type: 'text', x: 112, y: 112, w: 640, size: 34, color: '#f8fafc', align: 'left', text: '“One clear sentence that your audience should remember.”' },
+        { id: nid(), type: 'text', x: 112, y: 324, w: 640, size: 18, color: '#94a3b8', align: 'left', text: '— Speaker or source' },
+      ],
+    }),
+  },
+  {
+    name: 'Three key results', make: () => ({
+      id: nid(), fill: '#ffffff', els: [
+        { id: nid(), type: 'text', x: 52, y: 34, w: 740, size: 32, color: '#111827', align: 'left', text: '= Results at a glance' },
+        { id: nid(), type: 'rect', x: 52, y: 116, w: 226, h: 244, fill: '#eff6ff', stroke: '#bfdbfe', sw: 1.2, radius: 12 },
+        { id: nid(), type: 'rect', x: 308, y: 116, w: 226, h: 244, fill: '#f5f3ff', stroke: '#ddd6fe', sw: 1.2, radius: 12 },
+        { id: nid(), type: 'rect', x: 564, y: 116, w: 226, h: 244, fill: '#ecfdf5', stroke: '#a7f3d0', sw: 1.2, radius: 12 },
+        { id: nid(), type: 'text', x: 76, y: 142, w: 178, size: 42, color: '#2563eb', align: 'center', text: '*42%*' },
+        { id: nid(), type: 'text', x: 76, y: 224, w: 178, size: 18, color: '#334155', align: 'center', text: 'First result\nwith a short explanation' },
+        { id: nid(), type: 'text', x: 332, y: 142, w: 178, size: 42, color: '#7c3aed', align: 'center', text: '*3.2×*' },
+        { id: nid(), type: 'text', x: 332, y: 224, w: 178, size: 18, color: '#334155', align: 'center', text: 'Second result\nwith useful context' },
+        { id: nid(), type: 'text', x: 588, y: 142, w: 178, size: 42, color: '#059669', align: 'center', text: '*98%*' },
+        { id: nid(), type: 'text', x: 588, y: 224, w: 178, size: 18, color: '#334155', align: 'center', text: 'Third result\nand the takeaway' },
+      ],
+    }),
+  },
 ];
 
 const TOOL_LAUNCHERS: [string, string][] = [
@@ -201,6 +257,29 @@ const TOOL_LAUNCHERS: [string, string][] = [
 // …)); a numbered equation stretches to full width and re-centers, dragging a
 // placed element off its coordinates. Scope those rules off inside every element.
 const UNNUMBER = '#set math.equation(numbering: none)\n#set heading(numbering: none)\n';
+
+const arrowTriangle = (from: Pt, to: Pt, thickness: number): [Pt, Pt, Pt] => {
+  const angle = Math.atan2(to.y - from.y, to.x - from.x);
+  const size = Math.max(5, thickness * 4);
+  const base = { x: to.x - Math.cos(angle) * size, y: to.y - Math.sin(angle) * size };
+  const nx = -Math.sin(angle) * size * 0.5;
+  const ny = Math.cos(angle) * size * 0.5;
+  return [to, { x: base.x + nx, y: base.y + ny }, { x: base.x - nx, y: base.y - ny }];
+};
+
+const curveArrowTriangles = (e: CurveEl): [Pt, Pt, Pt][] => {
+  if (e.closed || e.pts.length < 2) return [];
+  const arrows = e.arrows ?? 'none';
+  const segs = curveCubics(e.pts, false);
+  if (!segs.length) return [];
+  const triangles: [Pt, Pt, Pt][] = [];
+  if (arrows === 'start' || arrows === 'both') triangles.push(arrowTriangle(segs[0].c1, e.pts[0], e.th));
+  if (arrows === 'end' || arrows === 'both') {
+    const last = segs[segs.length - 1];
+    triangles.push(arrowTriangle(last.c2, last.to, e.th));
+  }
+  return triangles;
+};
 
 function elCode(e: El): string {
   if (e.type === 'text') {
@@ -227,7 +306,11 @@ function elCode(e: El): string {
     ];
     if (e.closed) parts.push('curve.close()');
     const fill = e.closed && e.fill !== 'none' ? `fill: ${rgb(e.fill)}, ` : '';
-    return `#absolute-place(dx: 0pt, dy: 0pt, curve(${fill}stroke: ${e.th}pt + ${rgb(e.color)},\n  ${parts.join(',\n  ')}))`;
+    const curve = `#absolute-place(dx: 0pt, dy: 0pt, curve(${fill}stroke: ${e.th}pt + ${rgb(e.color)},\n  ${parts.join(',\n  ')}))`;
+    const heads = curveArrowTriangles(e).map(points =>
+      `#absolute-place(dx: 0pt, dy: 0pt, polygon(fill: ${rgb(e.color)}, stroke: none, ${points.map(p => `(${pt(p.x)}, ${pt(p.y)})`).join(', ')}))`,
+    );
+    return [curve, ...heads].join('\n');
   }
   const fill = e.fill === 'none' ? 'none' : rgb(e.fill);
   const stroke = e.sw > 0 ? `${e.sw}pt + ${rgb(e.stroke)}` : 'none';
@@ -258,11 +341,7 @@ function deckCode(slides: Slide[], imports: string[]): string {
 
 // Arrowhead polygon for the canvas preview, mirroring simple-arrow's shape.
 const headPts = (from: Pt, to: Pt, th: number, sc: number) => {
-  const ang = Math.atan2(to.y - from.y, to.x - from.x);
-  const w = th * 4 * sc, tip = { x: to.x * sc, y: to.y * sc };
-  const base = { x: tip.x - Math.cos(ang) * w, y: tip.y - Math.sin(ang) * w };
-  const nx = -Math.sin(ang) * w * 0.5, ny = Math.cos(ang) * w * 0.5;
-  return `${tip.x},${tip.y} ${base.x + nx},${base.y + ny} ${base.x - nx},${base.y - ny}`;
+  return arrowTriangle(from, to, th).map(point => `${point.x * sc},${point.y * sc}`).join(' ');
 };
 
 export default function SlideStudio({ onClose, onInsert, workspaceImages = [], existing, registerCapture, onOpenTool }: {
@@ -292,6 +371,8 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
   const [curvePts, setCurvePts] = useState<Pt[] | null>(null);  // in-progress curve
   const [curveHover, setCurveHover] = useState<Pt | null>(null);  // rubber-band preview while drawing
   const [showCode, setShowCode] = useState(false);
+  const [showGrid, setShowGrid] = useState(() => localStorage.getItem('hilbert-slide-grid') !== '0');
+  const [snapEnabled, setSnapEnabled] = useState(() => localStorage.getItem('hilbert-slide-snap') !== '0');
   const [sc, setSc] = useState(0.86);
   // WebKit's native CSS `resize` snaps back after a React render, so the
   // studio drags its own corner grip and keeps the size in state. Pointer
@@ -310,6 +391,12 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
     const t = setTimeout(() => { try { localStorage.setItem('hilbert-slide-studio-size', JSON.stringify(dim)); } catch { /* private mode */ } }, 300);
     return () => clearTimeout(t);
   }, [dim]);
+  useEffect(() => {
+    try {
+      localStorage.setItem('hilbert-slide-grid', showGrid ? '1' : '0');
+      localStorage.setItem('hilbert-slide-snap', snapEnabled ? '1' : '0');
+    } catch { /* private mode */ }
+  }, [showGrid, snapEnabled]);
   const startResize = (ev: React.PointerEvent) => {
     ev.preventDefault();
     ev.stopPropagation();
@@ -335,6 +422,9 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
     try { grip.setPointerCapture(ev.pointerId); } catch { /* capture unsupported */ }
   };
   const undoRef = useRef<Slide[][]>([]);
+  const redoRef = useRef<Slide[][]>([]);
+  const clipboardRef = useRef<El | null>(null);
+  const draggedSlideRef = useRef<number | null>(null);
   const dragRef = useRef<{ mode: 'move' | 'resize' | 'p1' | 'p2' | 'pt', id: number, grab: Pt, orig: El, idx?: number } | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<HTMLDivElement>(null);
@@ -353,11 +443,61 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
   const snapshot = () => {
     undoRef.current.push(JSON.parse(JSON.stringify(slidesRef.current)));
     if (undoRef.current.length > 60) undoRef.current.shift();
+    redoRef.current = [];
   };
   const setEls = (els: El[]) => setSlides(ss => ss.map((s, i) => i === cur ? { ...s, els } : s));
   const updateEl = (id: number, patch: Partial<El>) =>
     setEls(slide.els.map(e => e.id === id ? { ...e, ...patch } as El : e));
   const patchSel = (patch: any) => { if (selected != null) { snapshot(); updateEl(selected, patch); } };
+  const snapValue = (value: number) => snapEnabled ? snap(value) : Math.round(value * 10) / 10;
+
+  const restoreHistory = (from: React.MutableRefObject<Slide[][]>, to: React.MutableRefObject<Slide[][]>) => {
+    const previous = from.current.pop();
+    if (!previous) return;
+    to.current.push(JSON.parse(JSON.stringify(slidesRef.current)));
+    if (to.current.length > 60) to.current.shift();
+    setSlides(previous);
+    setSelected(null);
+    setEditing(null);
+    setCur(index => Math.min(index, previous.length - 1));
+  };
+  const undo = () => restoreHistory(undoRef, redoRef);
+  const redo = () => restoreHistory(redoRef, undoRef);
+
+  const copySelected = () => {
+    if (sel) clipboardRef.current = JSON.parse(JSON.stringify(sel));
+  };
+  const pasteCopied = () => {
+    if (!clipboardRef.current) return;
+    snapshot();
+    let copy: El = JSON.parse(JSON.stringify(clipboardRef.current));
+    copy.id = nid();
+    const b = bounds(copy);
+    const dx = b.x + b.w + 16 <= PW ? 16 : Math.max(-b.x, -16);
+    const dy = b.y + b.h + 16 <= PH ? 16 : Math.max(-b.y, -16);
+    copy = translateEl(copy, dx, dy);
+    setEls([...slide.els, copy]);
+    setSelected(copy.id);
+    setTool('select');
+  };
+  const duplicateSelected = () => {
+    if (!sel) return;
+    clipboardRef.current = JSON.parse(JSON.stringify(sel));
+    pasteCopied();
+  };
+
+  const positionSelected = (axis: 'x' | 'y', placement: 'start' | 'center' | 'end') => {
+    if (!sel) return;
+    const b = bounds(sel);
+    const extent = axis === 'x' ? PW : PH;
+    const size = axis === 'x' ? b.w : b.h;
+    const current = axis === 'x' ? b.x : b.y;
+    const safe = 32;
+    const target = placement === 'start' ? safe : placement === 'end' ? extent - safe - size : (extent - size) / 2;
+    snapshot();
+    const moved = translateEl(sel, axis === 'x' ? target - current : 0, axis === 'y' ? target - current : 0);
+    setEls(slide.els.map(element => element.id === sel.id ? moved : element));
+  };
 
   // Fit the canvas to whatever size the (resizable) modal currently has.
   useEffect(() => {
@@ -448,7 +588,7 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
     setCurveHover(null);
     if (!raw) return;
     const clean = raw.filter((q, i) => i === 0 || Math.hypot(q.x - raw[i - 1].x, q.y - raw[i - 1].y) > 2);
-    if (clean.length >= 2) addEl({ id: nid(), type: 'curve', pts: clean, color: '#111827', th: 2, closed: false, fill: 'none' });
+    if (clean.length >= 2) addEl({ id: nid(), type: 'curve', pts: clean, color: '#111827', th: 2, closed: false, fill: 'none', arrows: 'none' });
   };
 
   const chooseTool = (t: Tool) => {
@@ -484,11 +624,11 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
     if (editing != null) return;
     wrapRef.current?.focus();
     const p = toPt(ev);
-    if (tool === 'text') return addEl({ id: nid(), type: 'text', x: snap(p.x), y: snap(p.y), w: 240, size: 22, color: '#111827', align: 'left', text: 'New text' }, true);
-    if (tool === 'math') return addEl({ id: nid(), type: 'math', x: snap(p.x), y: snap(p.y), size: 26, color: '#111827', tex: 'e^(i pi) + 1 = 0' }, true);
-    if (tool === 'image') return addEl({ id: nid(), type: 'image', x: snap(p.x), y: snap(p.y), w: 220, path: workspaceImages[0] || 'images/figure.png' });
-    if (tool === 'curve') { setCurvePts(prev => [...(prev || []), { x: snap(p.x), y: snap(p.y) }]); return; }
-    if (tool !== 'select') { setDraft({ a: { x: snap(p.x), y: snap(p.y) }, b: { x: snap(p.x), y: snap(p.y) } }); return; }
+    if (tool === 'text') return addEl({ id: nid(), type: 'text', x: snapValue(p.x), y: snapValue(p.y), w: 240, size: 22, color: '#111827', align: 'left', text: 'New text' }, true);
+    if (tool === 'math') return addEl({ id: nid(), type: 'math', x: snapValue(p.x), y: snapValue(p.y), size: 26, color: '#111827', tex: 'e^(i pi) + 1 = 0' }, true);
+    if (tool === 'image') return addEl({ id: nid(), type: 'image', x: snapValue(p.x), y: snapValue(p.y), w: 220, path: workspaceImages[0] || 'images/figure.png' });
+    if (tool === 'curve') { setCurvePts(prev => [...(prev || []), { x: snapValue(p.x), y: snapValue(p.y) }]); return; }
+    if (tool !== 'select') { setDraft({ a: { x: snapValue(p.x), y: snapValue(p.y) }, b: { x: snapValue(p.x), y: snapValue(p.y) } }); return; }
 
     if (sel) {  // grab a handle of the current selection first
       if (sel.type === 'conn') {
@@ -509,7 +649,7 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
             const segIdx = Math.min(sel.pts.length - 2, Math.floor(best / SAMPLES_PER_SEG));
             snapshot();
             const pts = [...sel.pts];
-            pts.splice(segIdx + 1, 0, { x: snap(p.x), y: snap(p.y) });
+            pts.splice(segIdx + 1, 0, { x: snapValue(p.x), y: snapValue(p.y) });
             updateEl(sel.id, { pts });
             return;
           }
@@ -529,24 +669,24 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
 
   const onMove = (ev: React.MouseEvent) => {
     const p = toPt(ev);
-    if (draft) { setDraft({ a: draft.a, b: { x: snap(p.x), y: snap(p.y) } }); return; }
-    if (tool === 'curve' && curvePts) { setCurveHover({ x: snap(p.x), y: snap(p.y) }); return; }
+    if (draft) { setDraft({ a: draft.a, b: { x: snapValue(p.x), y: snapValue(p.y) } }); return; }
+    if (tool === 'curve' && curvePts) { setCurveHover({ x: snapValue(p.x), y: snapValue(p.y) }); return; }
     const d = dragRef.current;
     if (!d) return;
     const o = d.orig, dx = p.x - d.grab.x, dy = p.y - d.grab.y;
     if (d.mode === 'move') {
-      if (o.type === 'conn') updateEl(d.id, { x1: snap(o.x1 + dx), y1: snap(o.y1 + dy), x2: snap(o.x2 + dx), y2: snap(o.y2 + dy) });
-      else if (o.type === 'curve') updateEl(d.id, { pts: o.pts.map(q => ({ x: snap(q.x + dx), y: snap(q.y + dy) })) });
-      else updateEl(d.id, { x: snap((o as any).x + dx), y: snap((o as any).y + dy) });
+      if (o.type === 'conn') updateEl(d.id, { x1: snapValue(o.x1 + dx), y1: snapValue(o.y1 + dy), x2: snapValue(o.x2 + dx), y2: snapValue(o.y2 + dy) });
+      else if (o.type === 'curve') updateEl(d.id, { pts: o.pts.map(q => ({ x: snapValue(q.x + dx), y: snapValue(q.y + dy) })) });
+      else updateEl(d.id, { x: snapValue((o as any).x + dx), y: snapValue((o as any).y + dy) });
     } else if (d.mode === 'pt' && o.type === 'curve' && d.idx != null) {
       const pts = [...o.pts];
-      pts[d.idx] = { x: snap(p.x), y: snap(p.y) };
+      pts[d.idx] = { x: snapValue(p.x), y: snapValue(p.y) };
       updateEl(d.id, { pts });
-    } else if (d.mode === 'p1' && o.type === 'conn') updateEl(d.id, { x1: snap(p.x), y1: snap(p.y) });
-    else if (d.mode === 'p2' && o.type === 'conn') updateEl(d.id, { x2: snap(p.x), y2: snap(p.y) });
+    } else if (d.mode === 'p1' && o.type === 'conn') updateEl(d.id, { x1: snapValue(p.x), y1: snapValue(p.y) });
+    else if (d.mode === 'p2' && o.type === 'conn') updateEl(d.id, { x2: snapValue(p.x), y2: snapValue(p.y) });
     else if (d.mode === 'resize') {
-      if (o.type === 'rect' || o.type === 'ellipse' || o.type === 'hl') updateEl(d.id, { w: Math.max(12, snap(o.w + dx)), h: Math.max(8, snap(o.h + dy)) });
-      else if (o.type === 'text' || o.type === 'image' || o.type === 'typst') updateEl(d.id, { w: Math.max(40, snap(o.w + dx)) });
+      if (o.type === 'rect' || o.type === 'ellipse' || o.type === 'hl') updateEl(d.id, { w: Math.max(12, snapValue(o.w + dx)), h: Math.max(8, snapValue(o.h + dy)) });
+      else if (o.type === 'text' || o.type === 'image' || o.type === 'typst') updateEl(d.id, { w: Math.max(40, snapValue(o.w + dx)) });
       else if (o.type === 'math') updateEl(d.id, { size: clamp(Math.round(o.size + dy / 2), 10, 96) });
     }
   };
@@ -604,20 +744,19 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
     }
     if (ev.key === 'Backspace' || ev.key === 'Delete') { removeSel(); ev.preventDefault(); }
     else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'z') {
-      const prev = undoRef.current.pop();
-      if (prev) { setSlides(prev); setSelected(null); setCur(c => Math.min(c, prev.length - 1)); }
+      if (ev.shiftKey) redo(); else undo();
+      ev.preventDefault(); ev.stopPropagation();
+    } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'y') {
+      redo();
+      ev.preventDefault(); ev.stopPropagation();
+    } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'c' && sel) {
+      copySelected();
+      ev.preventDefault(); ev.stopPropagation();
+    } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'v' && clipboardRef.current) {
+      pasteCopied();
       ev.preventDefault(); ev.stopPropagation();
     } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'd') {
-      if (sel) {
-        snapshot();
-        const copy: El = JSON.parse(JSON.stringify(sel));
-        copy.id = nid();
-        if (copy.type === 'conn') { copy.x1 += 16; copy.y1 += 16; copy.x2 += 16; copy.y2 += 16; }
-        else if (copy.type === 'curve') copy.pts = copy.pts.map(q => ({ x: q.x + 16, y: q.y + 16 }));
-        else { (copy as any).x += 16; (copy as any).y += 16; }
-        setEls([...slide.els, copy]);
-        setSelected(copy.id);
-      }
+      duplicateSelected();
       ev.preventDefault();
     } else if (ev.key.startsWith('Arrow') && sel) {
       const step = ev.shiftKey ? 8 : 2;
@@ -630,6 +769,9 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
       ev.preventDefault();
     } else if (ev.key === 'Escape') {
       if (selected != null) setSelected(null); else onClose();
+    } else if (!sel && (ev.key === 'PageUp' || ev.key === 'PageDown')) {
+      setCur(index => clamp(index + (ev.key === 'PageUp' ? -1 : 1), 0, slides.length - 1));
+      ev.preventDefault();
     }
   };
 
@@ -673,6 +815,22 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
     snapshot();
     setSlides(ss => { const a = [...ss]; [a[cur], a[j]] = [a[j], a[cur]]; return a; });
     setCur(j);
+  };
+  const reorderSlide = (from: number, to: number) => {
+    if (from === to || from < 0 || to < 0 || from >= slides.length || to >= slides.length) return;
+    snapshot();
+    const currentId = slide.id;
+    const reordered = [...slides];
+    const [moved] = reordered.splice(from, 1);
+    reordered.splice(to, 0, moved);
+    setSlides(reordered);
+    setCur(Math.max(0, reordered.findIndex(item => item.id === currentId)));
+    setSelected(null);
+  };
+  const slideTitle = (item: Slide, index: number) => {
+    const text = item.els.find((element): element is TextEl => element.type === 'text')?.text;
+    const title = text?.split('\n').map(line => line.replace(/^[=* _-]+|[*_]$/g, '').trim()).find(Boolean);
+    return title || `Slide ${index + 1}`;
   };
 
   // --- rendering ---
@@ -791,6 +949,9 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
             <g key={e.id}>
               {isSel && <path d={d} fill="none" stroke="#7c3aed" strokeOpacity="0.25" strokeWidth={(e.th * k) + 6} />}
               <path d={d} fill={e.closed && e.fill !== 'none' ? e.fill : 'none'} stroke={e.color} strokeWidth={Math.max(0.5, e.th * k)} />
+              {curveArrowTriangles(e).map((triangle, index) => (
+                <polygon key={index} points={triangle.map(point => `${point.x * k},${point.y * k}`).join(' ')} fill={e.color} />
+              ))}
             </g>
           );
         }
@@ -884,13 +1045,27 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
             <br /><br />
             Drag the modal's bottom-right corner to resize the whole studio.
             <br /><br />
-            <b>⌫</b> delete · <b>⌘D</b> duplicate · arrows nudge · <b>⌘Z</b> undo
+            <b>⌫</b> delete · <b>⌘C / ⌘V</b> copy/paste · <b>⌘D</b> duplicate · arrows nudge · <b>⌘Z / ⌘⇧Z</b> undo/redo
           </div>
         </>
       );
     }
     return (
       <>
+        {field('Position on slide', (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <div className="seg">
+              <button onClick={() => positionSelected('x', 'start')} title="Align to the left safe margin">Left</button>
+              <button onClick={() => positionSelected('x', 'center')} title="Center horizontally">Center</button>
+              <button onClick={() => positionSelected('x', 'end')} title="Align to the right safe margin">Right</button>
+            </div>
+            <div className="seg">
+              <button onClick={() => positionSelected('y', 'start')} title="Align to the top safe margin">Top</button>
+              <button onClick={() => positionSelected('y', 'center')} title="Center vertically">Middle</button>
+              <button onClick={() => positionSelected('y', 'end')} title="Align to the bottom safe margin">Bottom</button>
+            </div>
+          </div>
+        ))}
         {sel.type === 'text' && (
           <>
             {field(`Font size — ${sel.size}pt`, <input type="range" min="10" max="72" step="1" value={sel.size} onChange={e => patchSel({ size: Number(e.target.value) })} />)}
@@ -976,6 +1151,13 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
           <>
             {field(`Thickness — ${sel.th}pt`, <input type="range" min="0.6" max="8" step="0.2" value={sel.th} onChange={e => patchSel({ th: Number(e.target.value) })} />)}
             {field('Colour', colorRow(sel.color, c => patchSel({ color: c })))}
+            {!sel.closed && field('Arrowheads', (
+              <div className="seg">
+                {([['none', 'None'], ['start', 'Start'], ['end', 'End'], ['both', 'Both']] as const).map(([value, label]) => (
+                  <button key={value} className={(sel.arrows ?? 'none') === value ? 'active' : ''} onClick={() => patchSel({ arrows: value })}>{label}</button>
+                ))}
+              </div>
+            ))}
             <label className="form-check">
               <input type="checkbox" checked={sel.closed} onChange={e => patchSel({ closed: e.target.checked })} />
               Close the curve
@@ -992,6 +1174,7 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
             <div className="form-hint">
               {sel.pts.length} control points. Drag a point to reshape, <b>double-click a point</b> to
               remove it, <b>shift-click the curve</b> to add one where you clicked.
+              {sel.closed && (sel.arrows ?? 'none') !== 'none' && <> Reopen the curve to show its arrowheads.</>}
             </div>
           </>
         )}
@@ -1008,7 +1191,10 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
             {field('Colour', colorRow(sel.color, c => patchSel({ color: c })))}
           </>
         )}
-        <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+        <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+          <button className="btn-ghost" onClick={copySelected} title="Copy element (⌘C)">Copy</button>
+          <button className="btn-ghost" onClick={duplicateSelected} title="Duplicate element (⌘D)">Duplicate</button>
+          <button className="btn-ghost" onClick={pasteCopied} title="Paste copied element (⌘V)">Paste</button>
           <button className="btn-ghost" onClick={() => zOrder(1)} title="Bring forward">Forward</button>
           <button className="btn-ghost" onClick={() => zOrder(-1)} title="Send backward">Backward</button>
           <button className="btn-ghost" onClick={removeSel}>Delete</button>
@@ -1052,7 +1238,14 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
               <button className="btn-ghost" title="Delete slide" onClick={delSlide} disabled={slides.length <= 1}>✕</button>
             </div>
             {slides.map((s, i) => (
-              <div key={s.id} onClick={() => { setCur(i); setSelected(null); setEditing(null); }} style={{ cursor: 'pointer', flex: 'none' }}>
+              <div key={s.id} draggable
+                onDragStart={event => { draggedSlideRef.current = i; event.dataTransfer.effectAllowed = 'move'; }}
+                onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }}
+                onDrop={event => { event.preventDefault(); if (draggedSlideRef.current != null) reorderSlide(draggedSlideRef.current, i); draggedSlideRef.current = null; }}
+                onDragEnd={() => { draggedSlideRef.current = null; }}
+                onClick={() => { setCur(i); setSelected(null); setEditing(null); }}
+                title="Drag to reorder"
+                style={{ cursor: 'grab', flex: 'none' }}>
                 <div style={{
                   position: 'relative', width: PW * TS, height: PH * TS, background: s.fill,
                   border: i === cur ? '2px solid #7c3aed' : '1px solid #cbd5e1', borderRadius: 3, overflow: 'hidden',
@@ -1060,7 +1253,9 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
                   {s.els.map(e => renderEl(e, TS, false))}
                   {renderConns(s, TS, false)}
                 </div>
-                <div style={{ fontSize: '0.68rem', opacity: 0.6, textAlign: 'center' }}>{i + 1}</div>
+                <div style={{ fontSize: '0.68rem', opacity: 0.7, textAlign: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '1px 3px' }}>
+                  {i + 1}. {slideTitle(s, i)}
+                </div>
               </div>
             ))}
           </div>
@@ -1083,7 +1278,10 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
                   {TOOL_LAUNCHERS.map(([k, name]) => <option key={k} value={k}>{name}</option>)}
                 </select>
               )}
-              <button className="btn-ghost" onClick={() => { const prev = undoRef.current.pop(); if (prev) { setSlides(prev); setSelected(null); setCur(c => Math.min(c, prev.length - 1)); } }}>Undo</button>
+              <button className="btn-ghost" onClick={undo} title="Undo (⌘Z)">Undo</button>
+              <button className="btn-ghost" onClick={redo} title="Redo (⌘⇧Z)">Redo</button>
+              <button className="btn-ghost" onClick={() => setShowGrid(value => !value)} title="Show or hide the alignment grid">{showGrid ? 'Grid on' : 'Grid off'}</button>
+              <button className="btn-ghost" onClick={() => setSnapEnabled(value => !value)} title="Snap moved and resized elements to the 4pt grid">{snapEnabled ? 'Snap on' : 'Snap off'}</button>
             </div>
 
             <div ref={fitRef} style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
@@ -1097,7 +1295,7 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
                   background: slide.fill, border: '1px solid #cbd5e1', borderRadius: 4,
                   boxShadow: '0 2px 10px rgba(0,0,0,0.10)', overflow: 'hidden',
                   cursor: tool === 'select' ? 'default' : 'crosshair',
-                  backgroundImage: 'radial-gradient(circle, rgba(100,116,139,0.18) 1px, transparent 1px)',
+                  backgroundImage: showGrid ? 'radial-gradient(circle, rgba(100,116,139,0.18) 1px, transparent 1px)' : 'none',
                   backgroundSize: `${20 * sc}px ${20 * sc}px`, backgroundColor: slide.fill,
                 }}
               >
@@ -1132,7 +1330,7 @@ export default function SlideStudio({ onClose, onInsert, workspaceImages = [], e
               </div>
             </div>
             <div className="form-hint" style={{ marginTop: 6, flex: 'none' }}>
-              Slide {cur + 1} of {slides.length} · 16:9 ({Math.round(PW)}×{Math.round(PH)}pt) · grid snap {GRID}pt · zoom {Math.round(sc * 100)}%.
+              Slide {cur + 1} of {slides.length} · 16:9 ({Math.round(PW)}×{Math.round(PH)}pt) · {snapEnabled ? `grid snap ${GRID}pt` : 'free positioning'} · zoom {Math.round(sc * 100)}%.
               Blocks from the app tools render as compiled previews; plain text and maths show their markup here and typeset in the PDF.
             </div>
           </div>
