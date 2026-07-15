@@ -114,6 +114,7 @@ fn set_bundled_tinymist(resource_dir: Option<&Path>) {
     }
     if let Some(tm) = find_bundled_tinymist(resource_dir) {
         std::env::set_var("TINYMIST_BIN", tm);
+        std::env::set_var("HILBERT_TINYMIST_SOURCE", "bundled");
     }
 }
 
@@ -190,6 +191,10 @@ fn headless_main() {
         server::serve(listener, state).await;
     });
 }
+
+// Handle to the backend state for the exit hook: the typst-watch preview
+// process and tinymist must be killed on quit or they outlive the app.
+static BACKEND_STATE: std::sync::OnceLock<Arc<server::AppState>> = std::sync::OnceLock::new();
 
 fn main() {
     augment_path();
@@ -279,6 +284,7 @@ fn main() {
             let state = Arc::new(server::AppState::new(ws, dist));
             *state.app.lock().unwrap() = Some(app.handle().clone());
             let init_script = init_script(state.api_token());
+            let _ = BACKEND_STATE.set(state.clone());
             tauri::async_runtime::spawn(server::serve(listener, state));
             // Dictionaries load on the first /lint call; see the note in headless_main.
 
@@ -308,6 +314,13 @@ fn main() {
                 .build()?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = BACKEND_STATE.get() {
+                    tauri::async_runtime::block_on(server::shutdown_children(state));
+                }
+            }
+        });
 }

@@ -12,6 +12,15 @@ type GitStatus = {
 
 type Interp = { label: string; path: string };
 type Tools = { execEnabled: boolean; interpreters: Record<string, Interp[]> };
+type TinymistStatus = {
+  available: boolean;
+  running: boolean;
+  path?: string;
+  source?: 'bundled' | 'managed' | 'environment' | 'path';
+  version?: string;
+  workspace?: string;
+  managedPath?: string;
+};
 
 type SettingsProps = {
   onClose: () => void,
@@ -23,6 +32,9 @@ type SettingsProps = {
 export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, onFontSize, compileDelay, onCompileDelay }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<'general' | 'interpreters' | 'git' | 'cloud'>('general');
   const [tools, setTools] = useState<Tools | null>(null);
+  const [tinymist, setTinymist] = useState<TinymistStatus | null>(null);
+  const [tinymistBusy, setTinymistBusy] = useState(false);
+  const [tinymistLog, setTinymistLog] = useState('');
   const [picked, setPicked] = useState<Record<string, string>>({});
   // Export resolution for inserted diagrams (flowchart etc.), in DPI.
   const [exportDpi, setExportDpi] = useState<number>(() => Number(localStorage.getItem('fc_export_dpi')) || 200);
@@ -38,6 +50,33 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
       setPicked(init);
     }).catch(() => {});
   }, [activeTab]);
+
+  const refreshTinymist = async () => {
+    try {
+      const response = await fetch(`${API}/lsp/status`);
+      setTinymist(response.ok ? await response.json() : null);
+    } catch { setTinymist(null); }
+  };
+
+  useEffect(() => { if (activeTab === 'general') refreshTinymist(); }, [activeTab]);
+
+  const restartTinymist = async () => {
+    setTinymistBusy(true);
+    try {
+      const response = await fetch(`${API}/lsp/restart`, { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) setTinymistLog(data.message || 'Tinymist could not be started.');
+      else {
+        setTinymistLog('Tinymist restarted.');
+        window.dispatchEvent(new Event('hilbert:tinymist-restarted'));
+      }
+      await refreshTinymist();
+    } catch {
+      setTinymistLog('Error: could not reach the local Tinymist manager.');
+    } finally {
+      setTinymistBusy(false);
+    }
+  };
   const [githubUrl, setGithubUrl] = useState('');
   const [githubToken, setGithubToken] = useState('');
   const [driveFolder, setDriveFolder] = useState('');
@@ -117,8 +156,10 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
                 <label style={labelStyle}>
                   Auto-compile after typing stops
                   <select style={inputStyle} value={compileDelay} onChange={e => onCompileDelay(Number(e.target.value))}>
-                    <option value={500}>0.5 s — fastest feedback</option>
-                    <option value={1000}>1 s — default</option>
+                    <option value={100}>0.1 s — near-instant</option>
+                    <option value={250}>0.25 s — fast</option>
+                    <option value={500}>0.5 s — quick feedback</option>
+                    <option value={1000}>1 s — balanced</option>
                     <option value={2000}>2 s — big documents</option>
                     <option value={4000}>4 s — huge documents / slow machines</option>
                   </select>
@@ -129,6 +170,34 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
                     onChange={e => { const v = Number(e.target.value); setExportDpi(v); localStorage.setItem('fc_export_dpi', String(v)); }} />
                   <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Resolution of flowchart / diagram images added to the PDF. Higher = sharper but larger files (96 draft → 500 print).</span>
                 </label>
+                <div style={{ padding: '12px', border: '1px solid var(--border-color)', borderRadius: 7, background: 'var(--bg-color)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 600 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: tinymist?.running ? '#10b981' : tinymist?.available ? '#f59e0b' : '#64748b' }} />
+                      Tinymist diagnostics
+                    </div>
+                    {tinymist?.available && (
+                      <button type="button" onClick={restartTinymist} disabled={tinymistBusy}
+                        style={{ ...btn('var(--accent)'), padding: '6px 10px', opacity: tinymistBusy ? 0.6 : 1 }}>
+                        {tinymistBusy ? 'Restarting…' : 'Restart'}
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ marginTop: 8, color: 'var(--text-muted)', fontSize: 12, lineHeight: 1.45 }}>
+                    {tinymist === null ? 'Checking availability…' : tinymist.available ? (
+                      <>
+                        {tinymist.version || 'Tinymist detected'} · {tinymist.source || 'system'}{tinymist.running ? ' · running' : ' · starts when a Typst file is checked'}
+                        {tinymist.path && <div style={{ marginTop: 4, overflowWrap: 'anywhere', fontFamily: 'monospace' }}>{tinymist.path}</div>}
+                      </>
+                    ) : (
+                      <>
+                        Not installed. Install Tinymist on PATH, set <code>TINYMIST_BIN</code>, or place the executable at:
+                        {tinymist.managedPath && <div style={{ marginTop: 4, overflowWrap: 'anywhere', fontFamily: 'monospace' }}>{tinymist.managedPath}</div>}
+                      </>
+                    )}
+                  </div>
+                </div>
+                {tinymistLog && <div style={{ padding: '9px 10px', background: 'var(--bg-color)', borderRadius: 4, fontSize: 12, color: 'var(--text-muted)' }}>{tinymistLog}</div>}
                 <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
                   All settings apply immediately and are remembered on this machine. ⌘S always compiles right away.
                 </p>

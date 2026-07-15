@@ -3,8 +3,10 @@ import { API } from './api';
 import Editor, { useMonaco } from '@monaco-editor/react';
 import { setupTypstLanguage, setWorkspaceImages } from './typstMonaco';
 import { useProofread } from './proofread';
+import { useTinymistDiagnostics, type EditorProblem } from './tinymistDiagnostics';
 import ProofreadPanel from './components/ProofreadPanel';
 import { tokenizeLine, bestMatch, type SyncPayload } from './syncMatch';
+import { snapUtf16OffsetToGrapheme, snapUtf16RangeToGraphemes } from './unicodeRanges';
 import type { PdfHandle } from './components/PdfPreview';
 import { PackageInstaller } from './PackageInstaller';
 import { TemplateInstaller } from './TemplateInstaller';
@@ -300,7 +302,13 @@ export default function App() {
   const [theme, setTheme] = useState<'typst-dark' | 'typst-light'>(() =>
     localStorage.getItem('editor_theme') === 'typst-light' ? 'typst-light' : 'typst-dark');
   const [editorFontSize, setEditorFontSize] = useState<number>(() => Number(localStorage.getItem('editor_font_size')) || 14);
-  const [compileDelay, setCompileDelay] = useState<number>(() => Number(localStorage.getItem('compile_delay')) || 1000);
+  const [compileDelay, setCompileDelay] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('compile_delay'));
+    // Move former defaults to the faster value once. After migration, every
+    // explicit choice (including 250 ms or 1 s) remains respected.
+    if (localStorage.getItem('compile_delay_version') !== '3' && (saved === 1000 || saved === 250)) return 100;
+    return saved || 100;
+  });
   useEffect(() => { localStorage.setItem('editor_theme', theme); }, [theme]);
   const [recentFolders, setRecentFolders] = useState<RecentFolder[]>(() => {
     try { return JSON.parse(localStorage.getItem('recent_folders') || '[]'); } catch { return []; }
@@ -322,7 +330,10 @@ export default function App() {
   useEffect(() => { localStorage.setItem('highlight_color', highlightColor); }, [highlightColor]);
   useEffect(() => { localStorage.setItem('text_color', textColor); }, [textColor]);
   useEffect(() => { localStorage.setItem('editor_font_size', String(editorFontSize)); }, [editorFontSize]);
-  useEffect(() => { localStorage.setItem('compile_delay', String(compileDelay)); }, [compileDelay]);
+  useEffect(() => {
+    localStorage.setItem('compile_delay', String(compileDelay));
+    localStorage.setItem('compile_delay_version', '3');
+  }, [compileDelay]);
 
   const activeTab = tabs.find(t => t.path === activeTabPath);
 
@@ -490,6 +501,7 @@ export default function App() {
   const monaco = useMonaco();
 
   const proof = useProofread(monaco, editorRef, activeTab?.path, activeTab?.content, PROOFREAD_FEATURE_ENABLED && proofreadEnabled);
+  const tinymist = useTinymistDiagnostics(monaco, editorRef, activeTab?.path, activeTab?.content);
 
   useEffect(() => { if (monaco) setupTypstLanguage(monaco); }, [monaco]);
   // Keep the editor's image-path autocomplete (inside image("…")) in sync with
@@ -512,12 +524,14 @@ export default function App() {
         restoreSessionOrDefault();
       })();
     }
-    fetch(`${API}/lsp/hover`, { method: 'POST', body: JSON.stringify({ file: 'main.typ', line: 0, character: 0, content: '' }), headers: {'Content-Type': 'application/json'} })
-      .then(() => {
+    fetch(`${API}/lsp/status`)
+      .then(response => response.ok ? response.json() : null)
+      .then(status => {
+        if (!status?.available) return;
         const w = (window as any);
         if (!w._hasLoggedTinymist) {
           w._hasLoggedTinymist = true;
-          w.logTiming('Tinymist connected');
+          w.logTiming(`Tinymist available${status.version ? ` (${status.version})` : ''}`);
         }
       })
       .catch(() => {});
@@ -1603,6 +1617,18 @@ export default function App() {
     insertCodeRaw(text);
   };
 
+  const graphemeSafeSelection = (model: any, selection: any) => {
+    if (!selection || selection.isEmpty() || !monaco) return selection;
+    const source = model.getValue();
+    const rawStart = model.getOffsetAt({ lineNumber: selection.startLineNumber, column: selection.startColumn });
+    const rawEnd = model.getOffsetAt({ lineNumber: selection.endLineNumber, column: selection.endColumn });
+    const safe = snapUtf16RangeToGraphemes(source, rawStart, rawEnd);
+    if (safe.start === rawStart && safe.end === rawEnd) return selection;
+    const start = model.getPositionAt(safe.start);
+    const end = model.getPositionAt(safe.end);
+    return new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column);
+  };
+
   const insertCodeRaw = (text: string) => {
     const editor = editorRef.current;
     const model = editor?.getModel();
@@ -1614,7 +1640,11 @@ export default function App() {
     const sel = editor.getSelection();
     let range;
     if (sel) {
-      range = { startLineNumber: sel.endLineNumber, startColumn: sel.endColumn, endLineNumber: sel.endLineNumber, endColumn: sel.endColumn } as any;
+      const source = model.getValue();
+      const rawEnd = model.getOffsetAt({ lineNumber: sel.endLineNumber, column: sel.endColumn });
+      const safeEnd = snapUtf16OffsetToGrapheme(source, rawEnd, 'forward');
+      const end = model.getPositionAt(safeEnd);
+      range = { startLineNumber: end.lineNumber, startColumn: end.column, endLineNumber: end.lineNumber, endColumn: end.column } as any;
     } else {
       const last = model.getLineCount();
       const col = model.getLineMaxColumn(last);
@@ -1704,7 +1734,7 @@ export default function App() {
   // cursor when nothing is selected.
   const replaceOrInsert = (sel: any, editor: any, model: any, text: string) => {
     if (sel && model && !sel.isEmpty()) {
-      editor.executeEdits('wrap', [{ range: sel, text, forceMoveMarkers: true }]);
+      editor.executeEdits('wrap', [{ range: graphemeSafeSelection(model, sel), text, forceMoveMarkers: true }]);
       editor.focus();
     } else insertCode(text);
   };
@@ -1717,7 +1747,8 @@ export default function App() {
   const getSelectionCtx = (fallback = '') => {
     const editor = editorRef.current;
     const model = editor?.getModel();
-    const sel = editor?.getSelection();
+    const rawSelection = editor?.getSelection();
+    const sel = rawSelection && model ? graphemeSafeSelection(model, rawSelection) : rawSelection;
     const inner = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).trim() : fallback;
     return { editor, model, sel, inner };
   };
@@ -1886,9 +1917,10 @@ export default function App() {
     if (!editorRef.current) return;
     const editor = editorRef.current;
     editor.focus();
-    const selection = editor.getSelection();
+    const rawSelection = editor.getSelection();
     const model = editor.getModel();
-    if (!selection || !model) return;
+    if (!rawSelection || !model) return;
+    const selection = graphemeSafeSelection(model, rawSelection);
     
     if (selection.isEmpty()) {
        insertCode(before + after);
@@ -2671,7 +2703,8 @@ export default function App() {
     const editor = editorRef.current, model = editor?.getModel();
     if (!editor || !model) return;
     editor.focus();
-    const sel = editor.getSelection();
+    const rawSelection = editor.getSelection();
+    const sel = rawSelection ? graphemeSafeSelection(model, rawSelection) : rawSelection;
     let text: string, range: any;
     if (sel && !sel.isEmpty()) {
       text = model.getValueInRange(sel); range = sel;
@@ -2868,7 +2901,8 @@ export default function App() {
     const model = editor?.getModel();
     if (!editor || !model) return;
     editor.focus();
-    const sel = editor.getSelection();
+    const rawSelection = editor.getSelection();
+    const sel = rawSelection ? graphemeSafeSelection(model, rawSelection) : rawSelection;
     if (sel && !sel.isEmpty()) {
       const inner = model.getValueInRange(sel);
       editor.executeEdits('font-size', [{ range: sel, text: `#text(size: ${pt}pt)[${inner}]`, forceMoveMarkers: true }]);
@@ -2896,15 +2930,14 @@ export default function App() {
   };
 
   // Parse `typst compile` diagnostics into structured, clickable problems.
-  type Problem = { severity: 'error' | 'warning'; message: string; file?: string; line?: number; col?: number };
-  const parseProblems = (logs: string | null): Problem[] => {
+  const parseProblems = (logs: string | null): EditorProblem[] => {
     if (!logs) return [];
     const lines = logs.split('\n');
-    const out: Problem[] = [];
+    const out: EditorProblem[] = [];
     for (let i = 0; i < lines.length; i++) {
       const m = lines[i].match(/^\s*(error|warning):\s*(.*)$/);
       if (!m) continue;
-      const prob: Problem = { severity: m[1] as any, message: m[2].trim() };
+      const prob: EditorProblem = { severity: m[1] as 'error' | 'warning', message: m[2].trim(), source: 'Typst compiler' };
       // The location line (┌─ file:line:col) usually follows within a few lines.
       let fromPackage = false;
       for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
@@ -2919,9 +2952,15 @@ export default function App() {
     }
     return out;
   };
-  const problems = useMemo(() => parseProblems(errorLogs), [errorLogs]);
+  const compileProblems = useMemo(() => parseProblems(errorLogs), [errorLogs]);
+  const problems = useMemo(() => {
+    if (!compileProblems.length) return tinymist.problems;
+    // Compiler errors describe the actual PDF build. Keep Tinymist's warnings,
+    // information and hints without duplicating speculative LSP errors.
+    return [...compileProblems, ...tinymist.problems.filter(problem => problem.severity !== 'error')];
+  }, [compileProblems, tinymist.problems]);
 
-  const jumpToProblem = async (p: Problem) => {
+  const jumpToProblem = async (p: EditorProblem) => {
     if (!p.line) return;
     if (p.file && p.file !== activeTabPath && !p.file.includes('@preview')) {
       const base = p.file.split('/').pop() || p.file;
@@ -3851,6 +3890,7 @@ export default function App() {
                       <div style={{ minWidth: 0 }}>
                         <div className="problem-msg">{p.message}</div>
                         {p.line && <div className="problem-loc">{(p.file || activeTabPath)}:{p.line}:{p.col}</div>}
+                        {p.source && <div className="problem-loc">{p.source}</div>}
                       </div>
                     </div>
                   ))}

@@ -662,6 +662,8 @@ body.is-resizing .editor-container {
 }
 .problem-dot.error { background: #ef4444; }
 .problem-dot.warning { background: #f59e0b; }
+.problem-dot.info { background: #38bdf8; }
+.problem-dot.hint { background: #94a3b8; }
 .problem-msg {
   font-size: 12px;
   color: var(--text-main);

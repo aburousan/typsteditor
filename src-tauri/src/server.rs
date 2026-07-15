@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
 };
 use base64::Engine;
-use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS, NON_ALPHANUMERIC};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::{
@@ -21,7 +21,7 @@ use std::{
     sync::{atomic::{AtomicU64, Ordering}, Arc, LazyLock, Mutex, RwLock},
     time::{Duration, Instant, SystemTime},
 };
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 // ---------------------------------------------------------------------------
@@ -60,6 +60,33 @@ pub struct Pkg {
     pub hay: String,
 }
 
+#[derive(Clone, Debug)]
+enum PreviewOutcome {
+    Waiting,
+    Success,
+    Error(String),
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+struct PreviewEvent {
+    generation: u64,
+    outcome: PreviewOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreviewKey {
+    workspace: PathBuf,
+    main: PathBuf,
+    font_signature: u64,
+}
+
+struct PreviewWatcher {
+    key: PreviewKey,
+    child: tokio::process::Child,
+    events: tokio::sync::watch::Receiver<PreviewEvent>,
+}
+
 pub struct AppState {
     pub workspace: RwLock<PathBuf>,
     pub dist: Option<PathBuf>,
@@ -67,6 +94,8 @@ pub struct AppState {
     pub interpreters: Interpreters,
     pub allow_exec: bool,
     pub exec_timeout_ms: u64,
+    source_generation: AtomicU64,
+    preview_watcher: tokio::sync::Mutex<Option<PreviewWatcher>>,
     pub compile_gate: tokio::sync::Semaphore,
     pub render_gate: tokio::sync::Semaphore,
     pub exec_gate: tokio::sync::Semaphore,
@@ -91,6 +120,8 @@ impl AppState {
             interpreters: detect_interpreters(),
             allow_exec: std::env::var("ALLOW_CODE_EXECUTION").ok().as_deref() != Some("0"),
             exec_timeout_ms: std::env::var("EXEC_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(45000),
+            source_generation: AtomicU64::new(0),
+            preview_watcher: tokio::sync::Mutex::new(None),
             compile_gate: tokio::sync::Semaphore::new(1),
             render_gate: tokio::sync::Semaphore::new(2),
             exec_gate: tokio::sync::Semaphore::new(1),
@@ -402,6 +433,8 @@ async fn workspace_root_post(State(st): St, body: Bytes) -> Response {
         Err(_) => return json_err(StatusCode::BAD_REQUEST, format!("Not a folder: {}", resolved.display())),
     }
     *st.workspace.write().unwrap_or_else(|e| e.into_inner()) = resolved.clone();
+    stop_preview_watcher(&st).await;
+    stop_lsp().await;
     Json(json!({ "ok": true, "root": resolved.to_string_lossy() })).into_response()
 }
 
@@ -451,7 +484,10 @@ async fn workspace_file_post(State(st): St, Query(q): Q, headers: HeaderMap, bod
         let _ = fs::create_dir_all(parent);
     }
     match fs::write(&full, content) {
-        Ok(_) => "OK".into_response(),
+        Ok(_) => {
+            st.source_generation.fetch_add(1, Ordering::AcqRel);
+            "OK".into_response()
+        }
         Err(_) => text_err(StatusCode::INTERNAL_SERVER_ERROR, "Error"),
     }
 }
@@ -723,25 +759,209 @@ async fn workspace_compress(State(st): St, body: Bytes) -> Response {
 // Compile
 // ---------------------------------------------------------------------------
 
-async fn compile(State(st): St, Query(q): Q, body: Bytes) -> Response {
-    let Ok(_permit) = st.compile_gate.acquire().await else {
-        return json_err(StatusCode::SERVICE_UNAVAILABLE, "Compiler is shutting down.");
-    };
-    let ws = st.ws();
-    let main_q = q.get("main").map(String::as_str).unwrap_or("main.typ");
-    let Some(main_path) = safe_workspace_path(&ws, main_q) else {
-        return json_err(StatusCode::BAD_REQUEST, "Invalid main path");
-    };
-    ensure_hilbert(&ws);
-    let output_path = hilbert_dir(&ws).join("out.pdf");
-    let body_str = String::from_utf8_lossy(&body);
-    if !body_str.trim().is_empty() {
-        let _ = fs::write(&main_path, body_str.as_bytes());
+fn font_signature(dir: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    fn walk(path: &Path, state: &mut std::collections::hash_map::DefaultHasher) {
+        let Ok(entries) = fs::read_dir(path) else { return };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_symlink() { continue; }
+            let path = entry.path();
+            path.hash(state);
+            if kind.is_dir() {
+                walk(&path, state);
+            } else if let Ok(meta) = entry.metadata() {
+                meta.len().hash(state);
+                meta.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos()).hash(state);
+            }
+        }
     }
-    // Make any fonts the user imported into <workspace>/fonts discoverable by the
-    // compiler so `#set text(font: "…")` works with custom .ttf/.otf files.
-    // `--root <ws>` lets `#include`/`#import` reach any file in the workspace
-    // (multi-file projects), matching the Electron backend.
+
+    let mut state = std::collections::hash_map::DefaultHasher::new();
+    if dir.is_dir() { walk(dir, &mut state); }
+    state.finish()
+}
+
+async fn read_preview_lines<R: AsyncRead + Unpin>(reader: R, tx: tokio::sync::mpsc::UnboundedSender<String>) {
+    let mut lines = BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if tx.send(line).is_err() { break; }
+    }
+}
+
+async fn collect_preview_events(
+    st: Arc<AppState>,
+    mut lines: tokio::sync::mpsc::UnboundedReceiver<String>,
+    events: tokio::sync::watch::Sender<PreviewEvent>,
+) {
+    let mut cycle_generation = st.source_generation.load(Ordering::Acquire);
+    let mut pending_error = false;
+    let mut diagnostics: Vec<String> = Vec::new();
+
+    loop {
+        let next = if pending_error {
+            match tokio::time::timeout(Duration::from_millis(45), lines.recv()).await {
+                Ok(line) => line,
+                Err(_) => {
+                    let message = if diagnostics.is_empty() { "Compilation failed.".into() } else { diagnostics.join("\n") };
+                    let _ = events.send(PreviewEvent { generation: cycle_generation, outcome: PreviewOutcome::Error(message) });
+                    pending_error = false;
+                    diagnostics.clear();
+                    continue;
+                }
+            }
+        } else {
+            lines.recv().await
+        };
+
+        let Some(line) = next else {
+            if pending_error {
+                let message = if diagnostics.is_empty() { "Compilation failed.".into() } else { diagnostics.join("\n") };
+                let _ = events.send(PreviewEvent { generation: cycle_generation, outcome: PreviewOutcome::Error(message) });
+            } else {
+                let generation = st.source_generation.load(Ordering::Acquire);
+                let _ = events.send(PreviewEvent { generation, outcome: PreviewOutcome::Unavailable });
+            }
+            break;
+        };
+        let line = line.trim_end_matches('\r').to_string();
+
+        if line.contains("compiling ...") {
+            cycle_generation = st.source_generation.load(Ordering::Acquire);
+            pending_error = false;
+            diagnostics.clear();
+            // Announce the in-flight cycle so waiters can tell "still compiling"
+            // apart from "no compile is coming for this generation".
+            let _ = events.send(PreviewEvent { generation: cycle_generation, outcome: PreviewOutcome::Waiting });
+        } else if line.contains("compiled successfully") || line.contains("compiled with warnings") {
+            let _ = events.send(PreviewEvent { generation: cycle_generation, outcome: PreviewOutcome::Success });
+            pending_error = false;
+            diagnostics.clear();
+        } else if line.contains("compiled with errors") {
+            pending_error = true;
+            diagnostics.clear();
+        } else if pending_error && !line.trim().is_empty() {
+            diagnostics.push(line);
+        }
+    }
+}
+
+async fn stop_preview_watcher(st: &Arc<AppState>) {
+    let mut guard = st.preview_watcher.lock().await;
+    if let Some(mut watcher) = guard.take() {
+        let _ = watcher.child.start_kill();
+        let _ = watcher.child.wait().await;
+    }
+}
+
+async fn ensure_preview_watcher(
+    st: &Arc<AppState>,
+    ws: &Path,
+    main_path: &Path,
+    output_path: &Path,
+) -> std::io::Result<tokio::sync::watch::Receiver<PreviewEvent>> {
+    let key = PreviewKey {
+        workspace: ws.to_path_buf(),
+        main: main_path.to_path_buf(),
+        font_signature: font_signature(&ws.join("fonts")),
+    };
+    let mut guard = st.preview_watcher.lock().await;
+    if let Some(watcher) = guard.as_mut() {
+        if watcher.key == key && matches!(watcher.child.try_wait(), Ok(None)) {
+            return Ok(watcher.events.clone());
+        }
+    }
+    if let Some(mut old) = guard.take() {
+        let _ = old.child.start_kill();
+        let _ = old.child.wait().await;
+    }
+
+    ensure_hilbert(ws);
+    let mut cmd = Command::new("typst");
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    cmd.arg("watch").arg("--root").arg(ws);
+    if ws.join("fonts").is_dir() {
+        cmd.arg("--font-path").arg("fonts");
+    }
+    cmd.arg(main_path)
+        .arg(output_path)
+        .current_dir(ws)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    strip_appimage_env(&mut cmd);
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel();
+    if let Some(stdout) = stdout {
+        tokio::spawn(read_preview_lines(stdout, line_tx.clone()));
+    }
+    if let Some(stderr) = stderr {
+        tokio::spawn(read_preview_lines(stderr, line_tx.clone()));
+    }
+    drop(line_tx);
+
+    let initial = PreviewEvent { generation: 0, outcome: PreviewOutcome::Waiting };
+    let (event_tx, event_rx) = tokio::sync::watch::channel(initial);
+    tokio::spawn(collect_preview_events(st.clone(), line_rx, event_tx));
+    *guard = Some(PreviewWatcher { key, child, events: event_rx.clone() });
+    Ok(event_rx)
+}
+
+enum WatchCompileResult {
+    Pdf(Vec<u8>),
+    CompileError(String),
+    Fallback,
+}
+
+async fn compile_from_watcher(
+    st: &Arc<AppState>,
+    ws: &Path,
+    main_path: &Path,
+    output_path: &Path,
+    target_generation: u64,
+) -> WatchCompileResult {
+    let Ok(mut events) = ensure_preview_watcher(st, ws, main_path, output_path).await else {
+        return WatchCompileResult::Fallback;
+    };
+    let finish = |outcome: PreviewOutcome| match outcome {
+        PreviewOutcome::Success => fs::read(output_path).map(WatchCompileResult::Pdf).unwrap_or(WatchCompileResult::Fallback),
+        PreviewOutcome::Error(message) => WatchCompileResult::CompileError(message),
+        _ => WatchCompileResult::Fallback,
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let event = events.borrow().clone();
+        let in_flight = matches!(event.outcome, PreviewOutcome::Waiting);
+        if event.generation >= target_generation && !in_flight {
+            return finish(event.outcome);
+        }
+        // While a cycle is compiling, wait for it to finish (typst watch queues
+        // file events, so a newer write starts the next cycle right after). When
+        // the last cycle is already complete but predates the target and no new
+        // one begins shortly, the triggering write wasn't part of the compile
+        // graph (an asset, an unreferenced .bib, ...) — the completed result is
+        // already current, so serve it instead of stalling out the preview.
+        let wait = if in_flight {
+            deadline.saturating_duration_since(tokio::time::Instant::now())
+        } else {
+            Duration::from_millis(1500)
+        };
+        match tokio::time::timeout(wait, events.changed()).await {
+            Ok(Ok(())) => continue,
+            Ok(Err(_)) => return WatchCompileResult::Fallback,
+            Err(_) if in_flight => return WatchCompileResult::Fallback,
+            Err(_) => return finish(event.outcome),
+        }
+    }
+}
+
+async fn compile_once(ws: &Path, main_path: &Path, output_path: &Path) -> Response {
     let mut compile_args: Vec<String> = vec!["compile".into(), "--root".into(), ws.to_string_lossy().into_owned()];
     if ws.join("fonts").is_dir() {
         compile_args.push("--font-path".into());
@@ -750,7 +970,7 @@ async fn compile(State(st): St, Query(q): Q, body: Bytes) -> Response {
     compile_args.push(main_path.to_string_lossy().into_owned());
     compile_args.push(output_path.to_string_lossy().into_owned());
     let compile_argv: Vec<&str> = compile_args.iter().map(String::as_str).collect();
-    let out = match run_cmd("typst", &compile_argv, Some(&ws), None).await {
+    let out = match run_cmd("typst", &compile_argv, Some(ws), None).await {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return json_err(StatusCode::INTERNAL_SERVER_ERROR, TYPST_NOT_FOUND),
         Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not run typst: {e}")),
@@ -763,9 +983,35 @@ async fn compile(State(st): St, Query(q): Q, body: Bytes) -> Response {
         };
         return json_err(StatusCode::BAD_REQUEST, msg);
     }
-    match fs::read(&output_path) {
+    match fs::read(output_path) {
         Ok(bytes) => ([(header::CONTENT_TYPE, "application/pdf")], bytes).into_response(),
         Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn compile(State(st): St, Query(q): Q, body: Bytes) -> Response {
+    let Ok(_permit) = st.compile_gate.acquire().await else {
+        return json_err(StatusCode::SERVICE_UNAVAILABLE, "Compiler is shutting down.");
+    };
+    let ws = st.ws();
+    let main_q = q.get("main").map(String::as_str).unwrap_or("main.typ");
+    let Some(main_path) = safe_workspace_path(&ws, main_q) else {
+        return json_err(StatusCode::BAD_REQUEST, "Invalid main path");
+    };
+    ensure_hilbert(&ws);
+    let output_path = hilbert_dir(&ws).join("out.pdf");
+    let body_str = String::from_utf8_lossy(&body);
+    if !body_str.trim().is_empty() && fs::write(&main_path, body_str.as_bytes()).is_ok() {
+        st.source_generation.fetch_add(1, Ordering::AcqRel);
+    }
+    let generation = st.source_generation.load(Ordering::Acquire);
+    match compile_from_watcher(&st, &ws, &main_path, &output_path, generation).await {
+        WatchCompileResult::Pdf(bytes) => ([(header::CONTENT_TYPE, "application/pdf")], bytes).into_response(),
+        WatchCompileResult::CompileError(message) => json_err(StatusCode::BAD_REQUEST, message),
+        WatchCompileResult::Fallback => {
+            stop_preview_watcher(&st).await;
+            compile_once(&ws, &main_path, &output_path).await
+        }
     }
 }
 
@@ -2593,6 +2839,29 @@ async fn zotero_ping() -> Response {
     }
 }
 
+// The CAYW picker opens fine without Zotero's main library window, but Better
+// BibTeX resolves citation keys and library exports against the active pane,
+// which is null once that window is closed (the app keeps running windowless
+// on macOS). Opening a zotero:// URL makes Zotero recreate the window; only
+// meaningful against the default local instance, not a ZOTERO_URL override.
+fn zotero_pane_missing(text: &str) -> bool {
+    text.contains("getActiveZoteroPane")
+}
+
+const ZOTERO_NO_WINDOW: &str =
+    "Zotero's main window is closed and could not be reopened automatically — open the Zotero window, then try again.";
+
+async fn summon_zotero_window() -> bool {
+    if std::env::var("ZOTERO_URL").is_ok() {
+        return false;
+    }
+    if open::that_detached("zotero://select/library").is_err() {
+        return false;
+    }
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    true
+}
+
 // Opens Zotero's own "cite as you write" search popup and blocks until the
 // user picks papers (or cancels, which returns an empty body).
 async fn zotero_pick() -> Response {
@@ -2618,22 +2887,32 @@ async fn zotero_export(body: Bytes) -> Response {
     }
     let rpc = json!({ "jsonrpc": "2.0", "method": "item.export", "params": [keys, "biblatex"], "id": 1 });
     let z = zotero_base();
-    match ZOTERO_HTTP.post(format!("{z}/better-bibtex/json-rpc")).json(&rpc).timeout(Duration::from_secs(30)).send().await {
-        Ok(r) => {
-            let v: Value = r.json().await.unwrap_or(Value::Null);
-            if let Some(err) = v.get("error") {
-                let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("Zotero export failed.");
-                return json_err(StatusCode::BAD_GATEWAY, msg.to_string());
+    let mut summoned = false;
+    loop {
+        match ZOTERO_HTTP.post(format!("{z}/better-bibtex/json-rpc")).json(&rpc).timeout(Duration::from_secs(30)).send().await {
+            Ok(r) => {
+                let v: Value = r.json().await.unwrap_or(Value::Null);
+                if let Some(err) = v.get("error") {
+                    let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("Zotero export failed.");
+                    if zotero_pane_missing(msg) {
+                        if !summoned && summon_zotero_window().await {
+                            summoned = true;
+                            continue;
+                        }
+                        return json_err(StatusCode::BAD_GATEWAY, ZOTERO_NO_WINDOW);
+                    }
+                    return json_err(StatusCode::BAD_GATEWAY, msg.to_string());
+                }
+                // Older Better BibTeX versions wrap the text in an array.
+                let text = match v.get("result") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Array(a)) => a.iter().rev().find_map(|x| x.as_str()).unwrap_or("").to_string(),
+                    _ => String::new(),
+                };
+                return text.into_response();
             }
-            // Older Better BibTeX versions wrap the text in an array.
-            let text = match v.get("result") {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Array(a)) => a.iter().rev().find_map(|x| x.as_str()).unwrap_or("").to_string(),
-                _ => String::new(),
-            };
-            text.into_response()
+            Err(_) => return json_err(StatusCode::BAD_GATEWAY, ZOTERO_DOWN),
         }
-        Err(_) => json_err(StatusCode::BAD_GATEWAY, ZOTERO_DOWN),
     }
 }
 
@@ -2644,18 +2923,31 @@ async fn zotero_library() -> Response {
         format!("{z}/better-bibtex/export/library.biblatex"),
         format!("{z}/better-bibtex/export/library?/1/library.biblatex"),
     ];
-    for url in urls {
-        if let Ok(r) = ZOTERO_HTTP.get(&url).timeout(Duration::from_secs(120)).send().await {
-            if r.status().is_success() {
-                if let Ok(t) = r.text().await {
-                    if t.trim().is_empty() || t.trim_start().starts_with('@') {
-                        return t.into_response();
+    let mut summoned = false;
+    let mut pane_blocked = false;
+    'attempt: loop {
+        for url in &urls {
+            if let Ok(r) = ZOTERO_HTTP.get(url).timeout(Duration::from_secs(120)).send().await {
+                let ok = r.status().is_success();
+                let Ok(t) = r.text().await else { continue };
+                if ok && (t.trim().is_empty() || t.trim_start().starts_with('@')) {
+                    return t.into_response();
+                }
+                if zotero_pane_missing(&t) {
+                    pane_blocked = true;
+                    if !summoned && summon_zotero_window().await {
+                        summoned = true;
+                        continue 'attempt;
                     }
                 }
+            } else {
+                return json_err(StatusCode::BAD_GATEWAY, ZOTERO_DOWN);
             }
-        } else {
-            return json_err(StatusCode::BAD_GATEWAY, ZOTERO_DOWN);
         }
+        break;
+    }
+    if pane_blocked {
+        return json_err(StatusCode::BAD_GATEWAY, ZOTERO_NO_WINDOW);
     }
     json_err(StatusCode::BAD_GATEWAY, "Could not export the library — check that Better BibTeX is installed in Zotero.")
 }
@@ -2827,15 +3119,57 @@ struct LspProxy {
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
     opened: HashMap<String, (i64, u64)>, // uri → (last version sent, content hash)
     next_id: i64,
+    workspace: PathBuf,
+    binary_path: String,
+    child: tokio::process::Child,
+    diagnostics: Arc<Mutex<LspDiagnosticState>>,
+    instance: u64,
 }
 
-// Resolve the tinymist LSP binary: prefer a bundled copy (main.rs sets
-// TINYMIST_BIN to the app-resource path when present), else `tinymist` on PATH.
-fn tinymist_bin() -> String {
-    std::env::var("TINYMIST_BIN")
-        .ok()
-        .filter(|p| Path::new(p).exists())
-        .unwrap_or_else(|| "tinymist".into())
+#[derive(Clone)]
+struct TinymistBinary {
+    path: String,
+    source: &'static str,
+}
+
+#[derive(Clone)]
+struct PublishedDiagnostics {
+    version: Option<i64>,
+    items: Value,
+    revision: u64,
+}
+
+#[derive(Default)]
+struct LspDiagnosticState {
+    revision: u64,
+    by_uri: HashMap<String, PublishedDiagnostics>,
+}
+
+fn managed_tinymist_path() -> PathBuf {
+    let name = if cfg!(windows) { "tinymist.exe" } else { "tinymist" };
+    dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+        .join("hilbert")
+        .join("bin")
+        .join(name)
+}
+
+// Resolution order is deterministic: an explicit/bundled override, a binary
+// managed under Hilbert's config directory, then the user's PATH.
+fn resolve_tinymist() -> Option<TinymistBinary> {
+    if let Some(path) = std::env::var("TINYMIST_BIN").ok().filter(|p| Path::new(p).is_file()) {
+        let source = if std::env::var("HILBERT_TINYMIST_SOURCE").ok().as_deref() == Some("bundled") {
+            "bundled"
+        } else {
+            "environment"
+        };
+        return Some(TinymistBinary { path, source });
+    }
+    let managed = managed_tinymist_path();
+    if managed.is_file() {
+        return Some(TinymistBinary { path: managed.to_string_lossy().into_owned(), source: "managed" });
+    }
+    which("tinymist").map(|path| TinymistBinary { path, source: "path" })
 }
 
 fn content_hash(s: &str) -> u64 {
@@ -2847,11 +3181,23 @@ fn content_hash(s: &str) -> u64 {
 
 static LSP: LazyLock<tokio::sync::Mutex<Option<LspProxy>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(None));
+static LSP_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
 static LSP_CMD_LINK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[.*?\]\(command:[^)]+\)(?:\s*\|\s*)?").unwrap());
 static LSP_TRAILING_RULE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\n+---\n*$").unwrap());
+const FILE_URI_ENCODE: &AsciiSet = &CONTROLS.add(b' ').add(b'#').add(b'?').add(b'%');
+
+fn file_uri(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let encoded = utf8_percent_encode(&normalized, FILE_URI_ENCODE);
+    if normalized.starts_with('/') {
+        format!("file://{encoded}")
+    } else {
+        format!("file:///{encoded}")
+    }
+}
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
@@ -2894,7 +3240,7 @@ impl LspProxy {
     // Keep tinymist's view of the file current: didOpen once, then didChange —
     // but only push a didChange when the text actually differs from last time,
     // so repeated hovers on an unchanged doc don't force a full re-parse.
-    async fn sync_file(&mut self, uri: &str, content: &str) {
+    async fn sync_file(&mut self, uri: &str, content: &str) -> (i64, bool) {
         let hash = content_hash(content);
         match self.opened.get(uri).copied() {
             None => {
@@ -2904,10 +3250,11 @@ impl LspProxy {
                     json!({ "textDocument": { "uri": uri, "languageId": "typst", "version": 1, "text": content } }),
                 )
                 .await;
+                (1, true)
             }
             Some((ver, prev_hash)) => {
                 if prev_hash == hash {
-                    return;
+                    return (ver, false);
                 }
                 let nv = ver + 1;
                 self.opened.insert(uri.to_string(), (nv, hash));
@@ -2919,6 +3266,7 @@ impl LspProxy {
                     }),
                 )
                 .await;
+                (nv, true)
             }
         }
     }
@@ -2927,11 +3275,20 @@ impl LspProxy {
 // Ensure a tinymist process is running and initialized. Returns false if it
 // could not be spawned (e.g. tinymist not installed) so callers degrade to null.
 async fn ensure_lsp(ws: &Path) -> bool {
+    let Some(binary) = resolve_tinymist() else {
+        return false;
+    };
     let mut guard = LSP.lock().await;
-    if guard.is_some() {
-        return true;
+    if let Some(proxy) = guard.as_mut() {
+        let alive = proxy.child.try_wait().ok().flatten().is_none();
+        if alive && proxy.workspace == ws && proxy.binary_path == binary.path {
+            return true;
+        }
     }
-    let mut cmd = Command::new(tinymist_bin());
+    if let Some(mut old) = guard.take() {
+        let _ = old.child.kill().await;
+    }
+    let mut cmd = Command::new(&binary.path);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — no console popup
     cmd.arg("lsp")
@@ -2939,7 +3296,7 @@ async fn ensure_lsp(ws: &Path) -> bool {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(false); // keep it alive after this fn drops the Child handle
+        .kill_on_drop(true);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(_) => return false,
@@ -2948,9 +3305,12 @@ async fn ensure_lsp(ws: &Path) -> bool {
     let mut stdout = child.stdout.take().unwrap();
     let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let diagnostics = Arc::new(Mutex::new(LspDiagnosticState::default()));
+    let instance = LSP_INSTANCE.fetch_add(1, Ordering::Relaxed) + 1;
 
     // Reader task: parse Content-Length framed JSON-RPC and dispatch responses.
     let pending_reader = pending.clone();
+    let diagnostics_reader = diagnostics.clone();
     tokio::spawn(async move {
         let mut buf: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 16384];
@@ -2981,18 +3341,43 @@ async fn ensure_lsp(ws: &Path) -> bool {
                         if let Some(tx) = pending_reader.lock().unwrap().remove(&id) {
                             let _ = tx.send(msg.get("result").cloned().unwrap_or(Value::Null));
                         }
+                    } else if msg.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics") {
+                        let params = msg.get("params").cloned().unwrap_or(Value::Null);
+                        if let Some(uri) = params.get("uri").and_then(Value::as_str) {
+                            let mut state = diagnostics_reader.lock().unwrap();
+                            state.revision += 1;
+                            let revision = state.revision;
+                            state.by_uri.insert(uri.to_string(), PublishedDiagnostics {
+                                version: params.get("version").and_then(Value::as_i64),
+                                items: params.get("diagnostics").cloned().unwrap_or_else(|| json!([])),
+                                revision,
+                            });
+                        }
                     }
                 }
             }
         }
         // Process ended — drop the proxy so the next request respawns it.
-        *LSP.lock().await = None;
+        let mut guard = LSP.lock().await;
+        if guard.as_ref().map(|proxy| proxy.instance) == Some(instance) {
+            *guard = None;
+        }
     });
 
-    let mut proxy = LspProxy { stdin, pending, opened: HashMap::new(), next_id: 0 };
+    let mut proxy = LspProxy {
+        stdin,
+        pending,
+        opened: HashMap::new(),
+        next_id: 0,
+        workspace: ws.to_path_buf(),
+        binary_path: binary.path,
+        child,
+        diagnostics,
+        instance,
+    };
 
     // initialize → (await result) → initialized
-    let root_uri = format!("file://{}", ws.to_string_lossy());
+    let root_uri = file_uri(ws);
     let rx = proxy
         .begin_request(
             "initialize",
@@ -3004,7 +3389,10 @@ async fn ensure_lsp(ws: &Path) -> bool {
             }),
         )
         .await;
-    let _ = tokio::time::timeout(Duration::from_secs(5), rx).await;
+    if !matches!(tokio::time::timeout(Duration::from_secs(5), rx).await, Ok(Ok(result)) if result.is_object()) {
+        let _ = proxy.child.kill().await;
+        return false;
+    }
     proxy.notify("initialized", json!({})).await;
 
     *guard = Some(proxy);
@@ -3029,7 +3417,10 @@ async fn lsp_hover(State(st): St, body: Bytes) -> Response {
     if !ensure_lsp(&ws).await {
         return Json(json!({ "contents": Value::Null })).into_response();
     }
-    let uri = format!("file://{}", lexical_resolve(&ws, &file).to_string_lossy());
+    let Some(full_path) = safe_workspace_path(&ws, &file) else {
+        return Json(json!({ "contents": Value::Null })).into_response();
+    };
+    let uri = file_uri(&full_path);
     let rx = {
         let mut guard = LSP.lock().await;
         let Some(p) = guard.as_mut() else {
@@ -3072,7 +3463,10 @@ async fn lsp_completion(State(st): St, body: Bytes) -> Response {
     if !ensure_lsp(&ws).await {
         return Json(json!({ "items": [] })).into_response();
     }
-    let uri = format!("file://{}", lexical_resolve(&ws, &file).to_string_lossy());
+    let Some(full_path) = safe_workspace_path(&ws, &file) else {
+        return Json(json!({ "items": [] })).into_response();
+    };
+    let uri = file_uri(&full_path);
     let rx = {
         let mut guard = LSP.lock().await;
         let Some(p) = guard.as_mut() else {
@@ -3100,6 +3494,114 @@ async fn lsp_completion(State(st): St, body: Bytes) -> Response {
         result.get("items").cloned().unwrap_or_else(|| json!([]))
     };
     Json(json!({ "items": items })).into_response()
+}
+
+async fn lsp_status() -> Response {
+    let binary = resolve_tinymist();
+    let (running, workspace) = {
+        let mut guard = LSP.lock().await;
+        match guard.as_mut() {
+            Some(proxy) => (
+                proxy.child.try_wait().ok().flatten().is_none()
+                    && binary.as_ref().map(|item| item.path.as_str()) == Some(proxy.binary_path.as_str()),
+                Some(proxy.workspace.to_string_lossy().into_owned()),
+            ),
+            None => (false, None),
+        }
+    };
+    let Some(binary) = binary else {
+        return Json(json!({
+            "available": false,
+            "running": false,
+            "managedPath": managed_tinymist_path(),
+        }))
+        .into_response();
+    };
+    let version_output = run_cmd(&binary.path, &["--version"], None, Some(3000))
+        .await
+        .ok()
+        .map(|out| if out.stdout.trim().is_empty() { out.stderr } else { out.stdout })
+        .unwrap_or_default();
+    let version = version_output.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+    Json(json!({
+        "available": true,
+        "running": running,
+        "path": binary.path,
+        "source": binary.source,
+        "version": version,
+        "workspace": workspace,
+        "managedPath": managed_tinymist_path(),
+    }))
+    .into_response()
+}
+
+async fn stop_lsp() {
+    let mut guard = LSP.lock().await;
+    if let Some(mut proxy) = guard.take() {
+        let _ = proxy.child.kill().await;
+    }
+}
+
+async fn lsp_restart(State(st): St) -> Response {
+    stop_lsp().await;
+    let available = ensure_lsp(&st.ws()).await;
+    Json(json!({
+        "ok": available,
+        "message": if available { "Tinymist restarted." } else { "Tinymist is not available." },
+    }))
+    .into_response()
+}
+
+// POST /lsp/diagnostics { file, content } waits for the publication belonging
+// to the synced document version, avoiding stale errors after a quick edit.
+async fn lsp_diagnostics(State(st): St, body: Bytes) -> Response {
+    let v = parse_json(&body);
+    let Some(file) = jstr(&v, "file") else {
+        return Json(json!({ "available": true, "diagnostics": [] })).into_response();
+    };
+    let content = jstr(&v, "content").unwrap_or("").to_string();
+    let ws = st.ws();
+    let Some(full_path) = safe_workspace_path(&ws, file) else {
+        return Json(json!({ "available": true, "diagnostics": [] })).into_response();
+    };
+    if !ensure_lsp(&ws).await {
+        return Json(json!({ "available": false, "diagnostics": [] })).into_response();
+    }
+    let uri = file_uri(&full_path);
+    let (target_version, changed, state, baseline) = {
+        let mut guard = LSP.lock().await;
+        let Some(proxy) = guard.as_mut() else {
+            return Json(json!({ "available": false, "diagnostics": [] })).into_response();
+        };
+        let state = proxy.diagnostics.clone();
+        let baseline = state.lock().unwrap().revision;
+        let (version, changed) = proxy.sync_file(&uri, &content).await;
+        (version, changed, state, baseline)
+    };
+
+    let wait = async {
+        loop {
+            let published = state.lock().unwrap().by_uri.get(&uri).cloned();
+            if let Some(published) = published {
+                let current_version = published.version.map(|version| version >= target_version).unwrap_or(false);
+                let fresh_unversioned = published.version.is_none() && published.revision > baseline;
+                if current_version || fresh_unversioned || !changed {
+                    return Some(published);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let published = tokio::time::timeout(Duration::from_secs(2), wait).await.ok().flatten();
+    let pending = published.is_none();
+    let version = published.as_ref().and_then(|item| item.version);
+    Json(json!({
+        "available": true,
+        "diagnostics": published.as_ref().map(|item| item.items.clone()).unwrap_or_else(|| json!([])),
+        "version": version,
+        "pending": pending,
+    }))
+    .into_response()
 }
 
 // Proofreading: spelling (spellbook / Nuspell-compatible) + grammar & style
@@ -3259,8 +3761,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/bib/fetch", post(bib_fetch))
         .route("/desktop/pick-folder", post(desktop_pick_folder))
         .route("/desktop/open", post(desktop_open))
+        .route("/lsp/status", get(lsp_status))
+        .route("/lsp/restart", post(lsp_restart))
         .route("/lsp/hover", post(lsp_hover))
         .route("/lsp/completion", post(lsp_completion))
+        .route("/lsp/diagnostics", post(lsp_diagnostics))
         .route("/lint", post(lint_text))
         .route("/lint/suggest", post(lint_suggest))
         .route("/lint/ignore", post(lint_ignore))
@@ -3277,6 +3782,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(cors)
         .layer(axum::middleware::from_fn(local_guard))
         .with_state(state)
+}
+
+// Kill the long-lived child processes (typst watch, tinymist). Called on app
+// exit — a GUI quit doesn't signal children, so without this they would keep
+// running (and recompiling on every file change) after Hilbert closes.
+pub async fn shutdown_children(state: &Arc<AppState>) {
+    stop_preview_watcher(state).await;
+    stop_lsp().await;
 }
 
 pub async fn serve(listener: std::net::TcpListener, state: Arc<AppState>) {

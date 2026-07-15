@@ -70,10 +70,12 @@ A 300-page stress document (7000 lines, 300 tables, 100 code blocks, heavy maths
 compiles in about **1.0 s** and first-renders in about **1.5 s**. Twenty consecutive
 compiles of it leave resident memory flat.
 
-Every compile spawns a fresh `typst` process, so an edit recompiles the whole
-document. A second per 300 pages is comfortable, but this is the one number that would
-need attention for a very large book. A `typst watch` sidecar, or the compiler used as
-a library, would make edits incremental.
+Live preview keeps one `typst watch` process per workspace and entry file, so warm
+edits reuse Typst's compiler state instead of starting a new process. Switching
+projects, changing the entry file, or importing fonts replaces the watcher cleanly.
+The backend retains the one-shot compiler as a fallback if the watcher is unavailable,
+and explicit exports still compile independently so export options remain isolated
+from preview state.
 
 ---
 
