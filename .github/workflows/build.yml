@@ -75,8 +75,12 @@ jobs:
           args: ${{ matrix.args }}
           tagName: tauri-v__VERSION__
           releaseName: "Hilbert (Tauri) v__VERSION__"
+          # This text is baked into latest.json as the update-dialog message
+          # (the app shows its first 300 characters), so keep it a short,
+          # user-facing summary and refresh it for every release. The full
+          # notes from docs/RELEASE_NOTES.md are pasted in at publish time.
           releaseBody: |
-            Draft — full notes are pasted from docs/RELEASE_NOTES.md when this release is published.
+            Slide Studio for building presentation decks, Zotero citations, a much faster live preview, and live error checking from tinymist.
           releaseDraft: true
           prerelease: false
 

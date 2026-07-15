@@ -440,6 +440,11 @@ The backend is built for local, single-user use:
 - It binds to `127.0.0.1` only, and CORS is limited to `localhost` and `127.0.0.1`.
   Requests carrying a foreign `Origin` or `Host` header are rejected, so a website you
   happen to have open cannot reach it.
+- Every API request additionally needs a random bearer token minted at launch and
+  handed only to the app's own window, so other local processes can't drive the
+  backend either. Headless/scripted use sets it explicitly:
+  `HILBERT_API_TOKEN=<32+ chars>` in the environment, then send
+  `Authorization: Bearer <token>` with each request.
 - File access is confined to the workspace, and path traversal is rejected.
 - Code execution can be turned off (`ALLOW_CODE_EXECUTION=0`). When on, it is
   time-limited, runs in a scratch directory under `.hilbert/run/` with OS resource
