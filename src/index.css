@@ -201,6 +201,60 @@ body {
   margin: 5px 8px;
 }
 
+/* Tick column in the View menu. It keeps its width when empty so the labels
+   stay on one vertical line whether or not a panel is showing. */
+.dropdown-check {
+  width: 12px;
+  flex: 0 0 12px;
+  color: var(--accent);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+/* ---- Status bar ---- */
+.status-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  background: var(--panel-bg);
+  border-top: 1px solid var(--border-color);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  user-select: none;
+}
+.status-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 19px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.11s ease, color 0.11s ease;
+}
+.status-btn:hover { background: var(--panel-lighter); color: var(--text-main); }
+.status-btn.on { color: var(--text-main); }
+.status-btn.on::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.status-note { padding: 0 6px; opacity: 0.8; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: #64748b; }
+.status-dot.ok { background: #4ade80; }
+.status-dot.warn { background: #f59e0b; }
+.status-dot.error { background: #f87171; }
+
 /* Nested submenus (flyout) */
 .dropdown-item.has-submenu {
   justify-content: space-between;
@@ -1040,6 +1094,11 @@ body.is-resizing .editor-container {
   position: relative;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
   background: #fff;
+  /* Nothing inside a page may reach past its edges. The text layer is absolutely
+     positioned and pdf.js sizes it itself, so a layer left over from a wider
+     zoom level would otherwise stretch the scrollable area — the page then sits
+     off-centre with a band of empty grey beside it, and Fit can't undo it. */
+  overflow: hidden;
 }
 .pdf-page canvas { display: block; pointer-events: none; }
 

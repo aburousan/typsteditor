@@ -10,7 +10,7 @@ type GitStatus = {
   clean?: boolean;
 };
 
-type Interp = { label: string; path: string };
+type Interp = { label: string; path: string; custom?: boolean };
 type Tools = { execEnabled: boolean; interpreters: Record<string, Interp[]> };
 type TinymistStatus = {
   available: boolean;
@@ -21,6 +21,15 @@ type TinymistStatus = {
   workspace?: string;
   managedPath?: string;
 };
+
+// An example that matches the machine the user is actually on, so the field
+// shows the shape of a real answer rather than a Unix path on Windows.
+function interpPlaceholder(lang: string): string {
+  const windows = navigator.userAgent.includes('Windows');
+  if (lang === 'julia') return windows ? String.raw`C:\Users\you\.julia\juliaup\bin\julia.exe` : '/usr/local/bin/julia';
+  if (lang === 'wolfram') return windows ? String.raw`C:\Program Files\Wolfram Research\WolframScript\wolframscript.exe` : '/usr/local/bin/wolframscript';
+  return windows ? String.raw`C:\path\to\project\.venv\Scripts\python.exe` : '/path/to/project/.venv/bin/python';
+}
 
 type SettingsProps = {
   onClose: () => void,
@@ -39,17 +48,86 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
   // Export resolution for inserted diagrams (flowchart etc.), in DPI.
   const [exportDpi, setExportDpi] = useState<number>(() => Number(localStorage.getItem('fc_export_dpi')) || 200);
 
+  // Path the user is typing/browsing for, and the last message, per language.
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [interpMsg, setInterpMsg] = useState<Record<string, string>>({});
+  const [interpBusy, setInterpBusy] = useState('');
+
+  const loadTools = async () => {
+    try {
+      const t: Tools = await (await fetch(`${API}/tools`)).json();
+      setTools(t);
+      setPicked(prev => {
+        const next = { ...prev };
+        for (const lang of Object.keys(t.interpreters)) {
+          const list = t.interpreters[lang];
+          const saved = next[lang] || localStorage.getItem(`interp_${lang}`) || '';
+          // Fall back to the first entry if the remembered one has gone away
+          // (environment deleted, project closed).
+          next[lang] = list.some(o => o.path === saved) ? saved : (list[0]?.path || '');
+        }
+        return next;
+      });
+      return t;
+    } catch { return null; }
+  };
+
   useEffect(() => {
     if (activeTab !== 'interpreters' || tools) return;
-    fetch(`${API}/tools`).then(r => r.json()).then((t: Tools) => {
-      setTools(t);
-      const init: Record<string, string> = {};
-      for (const lang of Object.keys(t.interpreters)) {
-        init[lang] = localStorage.getItem(`interp_${lang}`) || t.interpreters[lang][0]?.path || '';
-      }
-      setPicked(init);
-    }).catch(() => {});
+    loadTools();
   }, [activeTab]);
+
+  const chooseInterp = (lang: string, path: string) => {
+    setPicked(p => ({ ...p, [lang]: path }));
+    localStorage.setItem(`interp_${lang}`, path);
+  };
+
+  const addInterp = async (lang: string, path: string) => {
+    if (!path.trim()) { setInterpMsg(m => ({ ...m, [lang]: 'Enter or browse to the interpreter first.' })); return; }
+    setInterpBusy(lang);
+    setInterpMsg(m => ({ ...m, [lang]: 'Checking…' }));
+    try {
+      const res = await fetch(`${API}/tools/interpreter`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lang, path: path.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) { setInterpMsg(m => ({ ...m, [lang]: data.error || 'Could not add that interpreter.' })); return; }
+      await loadTools();
+      chooseInterp(lang, data.interpreter.path);
+      setDraft(d => ({ ...d, [lang]: '' }));
+      setInterpMsg(m => ({ ...m, [lang]: `Added ${data.interpreter.label} — now selected.` }));
+    } catch {
+      setInterpMsg(m => ({ ...m, [lang]: 'Could not reach the local server.' }));
+    } finally { setInterpBusy(''); }
+  };
+
+  const browseInterp = async (lang: string) => {
+    try {
+      const res = await fetch(`${API}/tools/interpreter/pick`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lang }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.noDialog) { setInterpMsg(m => ({ ...m, [lang]: 'File picker needs the desktop app — type the path instead.' })); return; }
+      if (data.path) await addInterp(lang, data.path);
+    } catch {
+      setInterpMsg(m => ({ ...m, [lang]: 'Could not open the file picker.' }));
+    }
+  };
+
+  const removeInterp = async (lang: string, path: string) => {
+    setInterpBusy(lang);
+    try {
+      await fetch(`${API}/tools/interpreter/remove`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lang, path }),
+      });
+      const t = await loadTools();
+      if (picked[lang] === path) chooseInterp(lang, t?.interpreters[lang]?.[0]?.path || '');
+      setInterpMsg(m => ({ ...m, [lang]: 'Removed.' }));
+    } catch {
+      setInterpMsg(m => ({ ...m, [lang]: 'Could not reach the local server.' }));
+    } finally { setInterpBusy(''); }
+  };
 
   const refreshTinymist = async () => {
     try {
@@ -135,7 +213,7 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
           ))}
         </div>
 
-        <div style={{ flex: 1, padding: '20px', overflowY: 'auto' }}>
+        <div style={{ flex: 1, minWidth: 0, padding: '20px', overflowY: 'auto', overflowX: 'hidden' }}>
           <button style={{ float: 'right', background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '20px', cursor: 'pointer' }} onClick={onClose}>×</button>
 
           {activeTab === 'general' && (
@@ -209,27 +287,58 @@ export default function AppSettingsModal({ onClose, theme, onTheme, fontSize, on
             <div>
               <h2 style={{ marginTop: 0 }}>Code Interpreters</h2>
               <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
-                Choose which environment runs each language in <b>Insert → Compute</b>. Detected from your system.
+                Choose which environment runs each language in <b>Insert → Compute</b>. Conda, uv, pyenv, virtualenv
+                and a <code>.venv</code> in the open project are found automatically; anything else you can point at
+                yourself, and it is remembered.
               </p>
               {tools && tools.execEnabled === false && (
                 <p style={{ fontSize: '13px', color: '#fca5a5' }}>Code execution is disabled on this server (ALLOW_CODE_EXECUTION=0).</p>
               )}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '20px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '18px', marginTop: '20px' }}>
                 {tools && Object.entries(tools.interpreters).map(([lang, list]) => (
-                  <label key={lang} style={labelStyle}>
+                  <div key={lang} style={{ ...labelStyle, gap: 7, minWidth: 0 }}>
                     {lang === 'wolfram' ? 'Wolfram' : lang[0].toUpperCase() + lang.slice(1)}
                     {list.length ? (
-                      <select
-                        value={picked[lang] || ''}
-                        onChange={e => { setPicked(p => ({ ...p, [lang]: e.target.value })); localStorage.setItem(`interp_${lang}`, e.target.value); }}
-                        style={inputStyle}
-                      >
+                      // Paths get long; without the explicit width the widest option
+                      // stretches the select and the whole panel scrolls sideways.
+                      <select value={picked[lang] || ''} onChange={e => chooseInterp(lang, e.target.value)}
+                        style={{ ...inputStyle, width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
                         {list.map(o => <option key={o.path} value={o.path}>{o.label} — {o.path}</option>)}
                       </select>
                     ) : (
-                      <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>Not found on this system.</span>
+                      <span style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 400 }}>
+                        Not found automatically — add one below.
+                      </span>
                     )}
-                  </label>
+                    <div style={{ display: 'flex', gap: 6, minWidth: 0 }}>
+                      <input
+                        type="text"
+                        placeholder={interpPlaceholder(lang)}
+                        value={draft[lang] || ''}
+                        onChange={e => setDraft(d => ({ ...d, [lang]: e.target.value }))}
+                        onKeyDown={e => { if (e.key === 'Enter') addInterp(lang, draft[lang] || ''); }}
+                        style={{ ...inputStyle, flex: 1, minWidth: 0, fontWeight: 400 }}
+                      />
+                      <button type="button" onClick={() => browseInterp(lang)} disabled={interpBusy === lang}
+                        style={{ ...btn('var(--panel-lighter)'), padding: '8px 10px', whiteSpace: 'nowrap' }}>Browse…</button>
+                      <button type="button" onClick={() => addInterp(lang, draft[lang] || '')} disabled={interpBusy === lang}
+                        style={{ ...btn('var(--accent)'), padding: '8px 12px' }}>Add</button>
+                    </div>
+                    {list.filter(o => o.custom).length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {list.filter(o => o.custom).map(o => (
+                          <div key={o.path} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 400, color: 'var(--text-muted)' }}>
+                            <span style={{ flex: 1, overflowWrap: 'anywhere', fontFamily: 'monospace' }}>{o.path}</span>
+                            <button type="button" title="Forget this interpreter" onClick={() => removeInterp(lang, o.path)}
+                              style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 15, lineHeight: 1 }}>×</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {interpMsg[lang] && (
+                      <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--text-muted)' }}>{interpMsg[lang]}</span>
+                    )}
+                  </div>
                 ))}
                 {!tools && <span style={{ color: 'var(--text-muted)' }}>Loading…</span>}
               </div>

@@ -108,6 +108,14 @@ interface FileNode {
 }
 type Tab = { path: string; content: string; isDirty: boolean };
 
+// The panels the View menu and the status bar can show and hide.
+type PanelKey = 'tree' | 'outline' | 'problems' | 'editor' | 'preview';
+type PanelState = Record<PanelKey, boolean>;
+const DEFAULT_PANELS: PanelState = { tree: true, outline: true, problems: true, editor: true, preview: true };
+const PANEL_LABELS: Record<PanelKey, string> = {
+  tree: 'File Tree', outline: 'File Outline', problems: 'Problems', editor: 'Editor', preview: 'PDF Preview',
+};
+
 // Show rule injected once when a notebook runs: badges each python/julia code
 // block in the compiled PDF with its language logo (files under .hilbert/logos/,
 // created by the backend on compile).
@@ -336,6 +344,17 @@ export default function App() {
   }, [compileDelay]);
 
   const activeTab = tabs.find(t => t.path === activeTabPath);
+  // Mirrored so callbacks that outlive a render (the editor's mount handler)
+  // read the current tab rather than the one captured when they were created.
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+
+  // Where the caret last was in each file, keyed by model URI. Monaco's editor
+  // component is recreated whenever the active tab briefly has no entry in
+  // `tabs` (a workspace reload, a file being renamed under it), and a fresh
+  // editor starts with no idea where you were — this is what puts it back
+  // instead of dropping the caret somewhere arbitrary.
+  const cursorMemoryRef = useRef<Record<string, { lineNumber: number; column: number }>>({});
 
   // Session restore: reopen the last project (workspace folder), its open tabs, and
   // the cursor position on the next launch, the way VS Code reopens where you left
@@ -365,16 +384,26 @@ export default function App() {
     sessionRef.current.activePath = activeTabPath;
     scheduleSaveSession();
   }, [tabs, activeTabPath]);
-  // Once a restored tab's content is in the editor, put the cursor back where it was.
-  useEffect(() => {
+  // Put the cursor back where the last session left it, once the restored tab's
+  // content is in the editor.
+  //
+  // This only ever applies to a document the user hasn't touched yet. Monaco is
+  // a lazily-loaded chunk, so at startup this runs before there is an editor to
+  // aim at and has to wait — and what it used to wait for was the next content
+  // change, which is the user's first keystroke. The restore then fired mid-edit
+  // and threw the cursor across the file. applyPendingCursor is called from the
+  // editor's mount instead, and typing discards the restore rather than arming it.
+  const applyPendingCursor = useCallback(() => {
     const cur = pendingCursorRef.current, ed = editorRef.current;
-    if (!cur || !ed || activeTab?.path !== cur.path || activeTab?.content === undefined) return;
+    if (!cur || !ed || activeTabRef.current?.path !== cur.path) return false;
+    pendingCursorRef.current = null;
     ed.setPosition({ lineNumber: cur.line, column: cur.column });
     ed.revealLineInCenter(cur.line);
     if (cur.scrollTop != null && ed.setScrollTop) ed.setScrollTop(cur.scrollTop);
     ed.focus();
-    pendingCursorRef.current = null;
-  }, [activeTabPath, activeTab?.content]);
+    return true;
+  }, []);
+  useEffect(() => { applyPendingCursor(); }, [activeTabPath, activeTab?.content, applyPendingCursor]);
   
   // Only a fallback for the header word count (until the PDF's own count lands),
   // so memoise it — no need to re-split the whole document on every render.
@@ -483,6 +512,36 @@ export default function App() {
   const [showRefManager, setShowRefManager] = useState(false);
   const [showBibManager, setShowBibManager] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Which panels are on screen, remembered between launches so the layout you
+  // set up is the one you come back to.
+  const [panels, setPanels] = useState<PanelState>(() => {
+    try {
+      const saved = localStorage.getItem('panel_visibility');
+      return saved ? { ...DEFAULT_PANELS, ...JSON.parse(saved) } : DEFAULT_PANELS;
+    } catch { return DEFAULT_PANELS; }
+  });
+  useEffect(() => { localStorage.setItem('panel_visibility', JSON.stringify(panels)); }, [panels]);
+  // The three sidebar sections share one container, so the sidebar itself goes
+  // away once none of them is left.
+  const sidebarVisible = sidebarOpen && (panels.tree || panels.outline || panels.problems);
+  // Two sidebar sections have a dragged height and one takes the slack. Normally
+  // that's the outline; with it hidden the job passes to whatever is left, so a
+  // lone section fills the sidebar instead of leaving a gap under it.
+  const stretchSection: PanelKey = panels.outline ? 'outline' : panels.tree ? 'tree' : 'problems';
+  const togglePanel = (key: PanelKey) => setPanels(p => {
+    const next = { ...p, [key]: !p[key] };
+    // Hiding both the editor and the preview would leave an empty window, so
+    // turning one off brings the other back.
+    if (!next.editor && !next.preview) next[key === 'editor' ? 'preview' : 'editor'] = true;
+    return next;
+  });
+  // Hiding the sidebar keeps the section choices; showing it again with every
+  // section switched off would open an empty strip, so restore them.
+  const toggleSidebar = () => {
+    if (sidebarVisible) { setSidebarOpen(false); return; }
+    setSidebarOpen(true);
+    setPanels(p => (p.tree || p.outline || p.problems) ? p : { ...p, tree: true, outline: true, problems: true });
+  };
   const [proofreadEnabled, setProofreadEnabled] = useState<boolean>(() => localStorage.getItem('proofread_enabled') === '1');
   useEffect(() => { localStorage.setItem('proofread_enabled', proofreadEnabled ? '1' : '0'); }, [proofreadEnabled]);
 
@@ -542,7 +601,7 @@ export default function App() {
       if (isResizingSidebar.current) {
         setSidebarWidth(Math.max(150, Math.min(e.clientX, 600)));
       } else if (isResizingEditor.current) {
-        const offset = (sidebarOpen ? sidebarWidth : 0) + 5;
+        const offset = (sidebarVisible ? sidebarWidth : 0) + 5;
         // Leave room for the sidebar, both resizers and a minimum preview width so
         // the PDF pane (and its toolbar) never gets pushed off-screen.
         const maxEditor = window.innerWidth - offset - 5 - 320;
@@ -573,7 +632,7 @@ export default function App() {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [sidebarOpen, sidebarWidth]);
+  }, [sidebarVisible, sidebarWidth]);
 
   // When a folder is opened in the browser via the File System Access API, this
   // holds a writable handle to the real folder on disk so edits are saved back
@@ -830,6 +889,10 @@ export default function App() {
   // listener on every render; identity only changes when the active tab does.
   const handleEditorChange = useCallback((value: string | undefined) => {
     if (value !== undefined && activeTabPath) {
+      // The user is editing, so any cursor position still waiting to be restored
+      // from the last session is stale — applying it now would move them
+      // mid-keystroke, which is exactly the jump this used to cause.
+      pendingCursorRef.current = null;
       setTabs(prev => prev.map(t => t.path === activeTabPath ? { ...t, content: value, isDirty: true } : t));
     }
   }, [activeTabPath]);
@@ -3226,7 +3289,7 @@ export default function App() {
   // dirty paths — not the tabs array, whose identity changes on every keystroke.
   const dirtyPathsKey = useMemo(() => tabs.filter(t => t.isDirty).map(t => t.path).sort().join('\u0001'), [tabs]);
   const treeJsx = useMemo(() => renderTree(filterTree(fileTree, treeSearch, searchContentResults)), [fileTree, activeTabPath, renamingPath, renameValue, selectedPaths, collapsedDirs, currentMain, dirtyPathsKey, treeSearch, searchContentResults]);
-  const outline = useMemo(() => (sidebarOpen ? getOutline() : []), [activeTab?.content, sidebarOpen]);
+  const outline = useMemo(() => (sidebarVisible && panels.outline ? getOutline() : []), [activeTab?.content, sidebarVisible, panels.outline]);
 
   const toggleMenu = (e: React.MouseEvent, menuName: string) => {
     e.stopPropagation();
@@ -3278,7 +3341,11 @@ export default function App() {
     { category: 'Edit', title: 'Toggle Numbering (at cursor)', hint: '⌘⇧N', run: toggleNumbering },
     { category: 'Edit', title: 'Toggle Equation Numbering (all)', run: toggleEquationNumbering },
     { category: 'Edit', title: 'Document Settings...', run: () => setShowEditSettings(true) },
-    { category: 'View', title: 'Toggle Sidebar', run: () => setSidebarOpen(v => !v) },
+    { category: 'View', title: 'Toggle Sidebar', run: toggleSidebar },
+    ...(Object.keys(PANEL_LABELS) as PanelKey[]).map(key => ({
+      category: 'View', title: `Show / Hide ${PANEL_LABELS[key]}`, run: () => togglePanel(key),
+    })),
+    { category: 'View', title: 'Show Everything', run: () => { setPanels(DEFAULT_PANELS); setSidebarOpen(true); } },
     { category: 'View', title: 'Toggle Editor Theme (dark / light)', run: () => setTheme(t => t === 'typst-dark' ? 'typst-light' : 'typst-dark') },
     { category: 'View', title: 'Version History...', run: () => setShowHistoryModal(true) },
     { category: 'View', title: 'Recompile Document', run: () => compileTypst(currentMain) },
@@ -3415,6 +3482,33 @@ export default function App() {
                   <div className="dropdown-item" onClick={() => { toggleNumbering(); setActiveMenu(null); }}>Toggle Numbering (at cursor) <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '0.75rem' }}>⌘⇧N</span></div>
                   <div className="dropdown-item" onClick={() => { toggleEquationNumbering(); setActiveMenu(null); }}>Toggle Equation Numbering (all)</div>
                   <div className="dropdown-item" onClick={() => { setShowEditSettings(true); setActiveMenu(null); }}>Document Settings...</div>
+                </div>
+              )}
+            </div>
+            <div {...menuProps('view')}>
+              View
+              {activeMenu === 'view' && (
+                // Clicks here don't close the menu (the app-level handler is
+                // stopped), so several panels can be toggled in one visit.
+                <div className="dropdown" onClick={e => e.stopPropagation()}>
+                  {(['tree', 'outline', 'problems'] as const).map(key => (
+                    <div key={key} className="dropdown-item" onClick={() => togglePanel(key)}>
+                      <span className="dropdown-check">{panels[key] ? '✓' : ''}</span>{PANEL_LABELS[key]}
+                    </div>
+                  ))}
+                  <div className="dropdown-divider"></div>
+                  {(['editor', 'preview'] as const).map(key => (
+                    <div key={key} className="dropdown-item" onClick={() => togglePanel(key)}>
+                      <span className="dropdown-check">{panels[key] ? '✓' : ''}</span>{PANEL_LABELS[key]}
+                    </div>
+                  ))}
+                  <div className="dropdown-divider"></div>
+                  <div className="dropdown-item" onClick={toggleSidebar}>
+                    <span className="dropdown-check">{sidebarVisible ? '✓' : ''}</span>Sidebar
+                  </div>
+                  <div className="dropdown-item" onClick={() => { setPanels(DEFAULT_PANELS); setSidebarOpen(true); setActiveMenu(null); }}>
+                    <span className="dropdown-check"></span>Show Everything
+                  </div>
                 </div>
               )}
             </div>
@@ -3631,7 +3725,7 @@ export default function App() {
           {PROOFREAD_FEATURE_ENABLED && proof.available && (
             <button
               className="theme-toggle"
-              onClick={() => { setProofreadEnabled(v => !v); if (!proofreadEnabled && !sidebarOpen) setSidebarOpen(true); }}
+              onClick={() => { setProofreadEnabled(v => !v); if (!proofreadEnabled && !sidebarVisible) toggleSidebar(); }}
               style={proofreadEnabled ? { color: '#34d399', borderColor: '#34d399' } : undefined}
               title={proofreadEnabled
                 ? `Proofreading on — spelling (Nuspell) + grammar/style (Harper)${proof.issues.length ? ` · ${proof.issues.length} issue(s)` : ''}. Click to turn off.`
@@ -3671,7 +3765,7 @@ export default function App() {
 
       <div className="toolbar">
         <div className="toolbar-group">
-          <button className="tool-btn" onClick={() => setSidebarOpen(!sidebarOpen)} title="Toggle Sidebar">
+          <button className="tool-btn" onClick={toggleSidebar} title="Toggle Sidebar">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
           </button>
           
@@ -3797,10 +3891,11 @@ export default function App() {
       </div>
 
       <div className="workspace" style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        {sidebarOpen && (
+        {sidebarVisible && (
           <>
             <div ref={sidebarRef} className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth, maxWidth: sidebarWidth, flex: 'none', display: 'flex', flexDirection: 'column' }}>
-              <div className="sidebar-section" style={{ height: treeHeight, flex: 'none', display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--border-color)' }}>
+              {panels.tree && (
+              <div className="sidebar-section" style={{ ...(stretchSection === 'tree' ? { flex: 1, minHeight: 80 } : { height: treeHeight, flex: 'none' }), display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--border-color)' }}>
                 <div className="sidebar-header" style={{ padding: '6px 14px', background: 'var(--panel-bg)', fontSize: '0.68rem', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--text-muted)', opacity: 0.75, display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)' }}>
                   File Tree
                   <span style={{ display: 'flex', gap: 10 }}>
@@ -3841,14 +3936,20 @@ export default function App() {
                   {treeJsx}
                 </div>
               </div>
+              )}
 
+              {/* A divider only earns its place between two visible sections,
+                  and only when the one above it is the fixed-height one. */}
+              {panels.tree && stretchSection !== 'tree' && (panels.outline || panels.problems) && (
               <div className="resizer-h" onMouseDown={(e) => {
                 e.preventDefault();
                 isResizingTree.current = true;
                 document.body.style.cursor = 'row-resize';
                 document.body.classList.add('is-resizing');
               }} />
+              )}
 
+              {panels.outline && (
               <div className="sidebar-section" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 80 }}>
                 <div className="sidebar-header" style={{ padding: '6px 14px', background: 'var(--panel-bg)', fontSize: '0.68rem', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--text-muted)', opacity: 0.75 }}>
                   File Outline
@@ -3864,7 +3965,9 @@ export default function App() {
                   ))}
                 </div>
               </div>
+              )}
 
+              {panels.problems && (panels.tree || panels.outline) && (
               <div className="resizer-h" onMouseDown={(e) => {
                 e.preventDefault();
                 isResizingProblems.current = true;
@@ -3872,8 +3975,10 @@ export default function App() {
                 document.body.style.cursor = 'row-resize';
                 document.body.classList.add('is-resizing');
               }} />
+              )}
 
-              <div className="sidebar-section problems-section" style={{ flex: 'none', height: problemsHeight, display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--border-color)' }}>
+              {panels.problems && (
+              <div className="sidebar-section problems-section" style={{ ...(stretchSection === 'problems' ? { flex: 1, minHeight: 80 } : { flex: 'none', height: problemsHeight }), display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--border-color)' }}>
                 <div className="sidebar-header" style={{ padding: '6px 14px', background: 'var(--panel-bg)', fontSize: '0.68rem', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', opacity: 0.85, color: problems.some(p => p.severity === 'error') ? '#f87171' : 'var(--text-muted)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span>Problems</span>
                   {problems.length > 0 && <span className="problem-badge">{problems.length}</span>}
@@ -3896,6 +4001,7 @@ export default function App() {
                   ))}
                 </div>
               </div>
+              )}
 
               {PROOFREAD_FEATURE_ENABLED && proof.available && proofreadEnabled && (
                 <ProofreadPanel
@@ -3920,7 +4026,17 @@ export default function App() {
             }} />
           </>
         )}
-        <div className="editor-pane" onClick={() => setIsSearchVisible(false)} style={{ width: editorWidth, minWidth: editorWidth, maxWidth: editorWidth, flex: 'none', display: 'flex', flexDirection: 'column' }}>
+        {/* Hidden panes stay mounted behind display:none rather than being torn
+            down — Monaco would lose its undo history and the preview its scroll
+            and zoom. The dragged width only applies while both are on screen;
+            alone, a pane takes the whole area. */}
+        <div className="editor-pane" onClick={() => setIsSearchVisible(false)} style={{
+          ...(panels.editor && panels.preview
+            ? { width: editorWidth, minWidth: editorWidth, maxWidth: editorWidth, flex: 'none' }
+            : { flex: 1, minWidth: 0 }),
+          display: panels.editor ? 'flex' : 'none',
+          flexDirection: 'column',
+        }}>
           <div className="tabs">
             {tabs.map(tab => (
               <div key={tab.path} className={`tab ${activeTabPath === tab.path ? 'active' : ''}`} onClick={() => setActiveTabPath(tab.path)}>
@@ -4023,10 +4139,23 @@ export default function App() {
                     onMount={(e, monacoInstance) => {
                       (window as any).logTiming('Monaco ready');
                       editorRef.current = e;
-                      // Remember cursor position for session restore (debounced write).
+                      // Remember cursor position for session restore (debounced write)
+                      // and, per file, so a recreated editor lands back where it was.
                       e.onDidChangeCursorPosition(() => {
                         const p = e.getPosition();
-                        if (p) { sessionRef.current.cursor = { line: p.lineNumber, column: p.column }; sessionRef.current.scrollTop = e.getScrollTop?.(); scheduleSaveSession(); }
+                        if (!p) return;
+                        const uri = e.getModel()?.uri.toString();
+                        if (uri) cursorMemoryRef.current[uri] = { lineNumber: p.lineNumber, column: p.column };
+                        sessionRef.current.cursor = { line: p.lineNumber, column: p.column };
+                        sessionRef.current.scrollTop = e.getScrollTop?.();
+                        scheduleSaveSession();
+                      });
+                      // Switching tabs swaps the model under the same editor, which
+                      // resets the caret to the top; put it back too.
+                      e.onDidChangeModel(() => {
+                        const model = e.getModel();
+                        const saved = model && cursorMemoryRef.current[model.uri.toString()];
+                        if (saved) { e.setPosition(saved); e.revealLineInCenter(saved.lineNumber); }
                       });
                       (e as any).onDidType(() => {
                         const pos = e.getPosition(); const model = e.getModel();
@@ -4037,6 +4166,17 @@ export default function App() {
                       monacoInstance.editor.setTheme(theme);
                       e.updateOptions({ hover: { enabled: true, delay: 300 } });
                       e.addCommand(monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.KeyY, () => e.trigger('keyboard', 'redo', null));
+                      // Ctrl/⌘+/ comments the selected lines. Monaco's own binding
+                      // is on the physical US slash key, so it never fires on
+                      // layouts where "/" needs a modifier (AZERTY, QWERTZ); match
+                      // the character the layout produced instead. defaultPrevented
+                      // means Monaco already handled it — don't toggle twice.
+                      e.getDomNode()?.addEventListener('keydown', (ev: KeyboardEvent) => {
+                        if (ev.defaultPrevented || ev.altKey || !(ev.ctrlKey || ev.metaKey)) return;
+                        if (ev.key !== '/' && ev.code !== 'NumpadDivide') return;
+                        ev.preventDefault();
+                        e.getAction('editor.action.commentLine')?.run();
+                      });
                       // Forward sync: reveal the cursor's line in the PDF preview.
                       e.addAction({
                         id: 'hilbert.syncToPdf',
@@ -4046,8 +4186,22 @@ export default function App() {
                         contextMenuOrder: 1.5,
                         run: () => forwardSyncRef.current(),
                       });
+                      // The editor exists from here on, so a cursor position held
+                      // over from the last session can finally be applied. It
+                      // wins: it's the most specific thing we know about where
+                      // the user was.
                       const m = e.getModel();
-                      if (m) { const last = m.getLineCount(); e.setPosition({ lineNumber: last, column: m.getLineMaxColumn(last) }); }
+                      if (m && !applyPendingCursor()) {
+                        // Otherwise a file we've already been editing reopens
+                        // where the caret was, and only a document we've never
+                        // seen starts at the end — that's the starter template,
+                        // where you want to type after it, not inside it.
+                        // Scroll back too: a fresh editor starts at the top, so
+                        // restoring only the caret would still look like a jump.
+                        const saved = cursorMemoryRef.current[m.uri.toString()];
+                        if (saved) { e.setPosition(saved); e.revealLineInCenter(saved.lineNumber); }
+                        else { const last = m.getLineCount(); e.setPosition({ lineNumber: last, column: m.getLineMaxColumn(last) }); }
+                      }
                     }}
                     options={editorOptions}
                   />
@@ -4058,13 +4212,15 @@ export default function App() {
             )}
           </div>
         </div>
+        {panels.editor && panels.preview && (
         <div className="resizer" onMouseDown={(e) => {
           e.preventDefault();
           isResizingEditor.current = true;
           document.body.style.cursor = 'col-resize';
           document.body.classList.add('is-resizing');
         }} />
-        <div className="preview-pane" style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', position: 'relative', backgroundColor: '#ffffff' }}>
+        )}
+        <div className="preview-pane" style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: panels.preview ? 'flex' : 'none', flexDirection: 'column', position: 'relative', backgroundColor: '#ffffff' }}>
           <div style={{ flex: 1, minWidth: 0, position: 'relative', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
             {/* PDF stays mounted whenever it exists, so its scroll/zoom survive
                 switching to the Problems view and back. */}
@@ -4133,6 +4289,36 @@ export default function App() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Status bar: the problem count on the left the way an IDE puts it, and
+          a switch per panel on the right, mirroring the View menu. */}
+      <div className="status-bar">
+        <button
+          className={`status-btn ${panels.problems ? 'on' : ''}`}
+          onClick={() => togglePanel('problems')}
+          title={panels.problems ? 'Hide the Problems panel' : 'Show the Problems panel'}
+        >
+          <span className={`status-dot ${problems.some(p => p.severity === 'error') ? 'error' : problems.length ? 'warn' : 'ok'}`} />
+          {(() => {
+            const errs = problems.filter(p => p.severity === 'error').length;
+            const rest = problems.length - errs;
+            if (!problems.length) return 'No problems';
+            return `${errs} error${errs === 1 ? '' : 's'}${rest ? `, ${rest} other${rest === 1 ? '' : 's'}` : ''}`;
+          })()}
+        </button>
+        {isCompiling && <span className="status-note">Compiling…</span>}
+        <span style={{ flex: 1 }} />
+        {(Object.keys(PANEL_LABELS) as PanelKey[]).map(key => (
+          <button
+            key={key}
+            className={`status-btn ${panels[key] ? 'on' : ''}`}
+            onClick={() => togglePanel(key)}
+            title={`${panels[key] ? 'Hide' : 'Show'} ${PANEL_LABELS[key]}`}
+          >
+            {PANEL_LABELS[key]}
+          </button>
+        ))}
       </div>
 
       {showPackageInstaller && <PackageInstaller onClose={() => setShowPackageInstaller(false)} onInsert={(pkg) => {

@@ -32,6 +32,15 @@ use tokio::process::Command;
 pub struct Interp {
     pub label: String,
     pub path: String,
+    // Added by hand through Settings → Interpreters (and removable there),
+    // as opposed to one we found by scanning the usual install locations.
+    pub custom: bool,
+}
+
+impl Interp {
+    fn found(label: impl Into<String>, path: impl Into<String>) -> Self {
+        Interp { label: label.into(), path: path.into(), custom: false }
+    }
 }
 
 #[derive(Clone, serde::Serialize, Default)]
@@ -50,6 +59,41 @@ impl Interpreters {
             _ => &[],
         }
     }
+
+    fn for_lang_mut(&mut self, lang: &str) -> Option<&mut Vec<Interp>> {
+        match lang {
+            "python" => Some(&mut self.python),
+            "julia" => Some(&mut self.julia),
+            "wolfram" => Some(&mut self.wolfram),
+            _ => None,
+        }
+    }
+
+    // Append entries we haven't already got, comparing by path so a hand-added
+    // interpreter that detection later learns to find doesn't show up twice.
+    fn merge(&mut self, other: &Interpreters) {
+        for lang in ["python", "julia", "wolfram"] {
+            let extra: Vec<Interp> = other
+                .for_lang(lang)
+                .iter()
+                .filter(|c| !self.for_lang(lang).iter().any(|have| same_path(&have.path, &c.path)))
+                .cloned()
+                .collect();
+            if let Some(list) = self.for_lang_mut(lang) {
+                list.extend(extra);
+            }
+        }
+    }
+}
+
+// Windows paths are case-insensitive and users type them with either slash, so
+// comparing the raw strings would let the same interpreter be added twice.
+fn same_path(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        let s = s.replace('\\', "/");
+        if cfg!(windows) { s.to_lowercase() } else { s }
+    };
+    norm(a) == norm(b)
 }
 
 // A universe package with its searchable text lowercased once at index time,
@@ -91,7 +135,10 @@ pub struct AppState {
     pub workspace: RwLock<PathBuf>,
     pub dist: Option<PathBuf>,
     api_token: String,
-    pub interpreters: Interpreters,
+    // Interpreters found by scanning the usual install locations, plus the ones
+    // the user added by hand (persisted, so they survive a restart).
+    pub detected: Interpreters,
+    pub custom: RwLock<Interpreters>,
     pub allow_exec: bool,
     pub exec_timeout_ms: u64,
     source_generation: AtomicU64,
@@ -117,7 +164,8 @@ impl AppState {
             workspace: RwLock::new(workspace),
             dist,
             api_token,
-            interpreters: detect_interpreters(),
+            detected: detect_interpreters(),
+            custom: RwLock::new(load_custom_interpreters()),
             allow_exec: std::env::var("ALLOW_CODE_EXECUTION").ok().as_deref() != Some("0"),
             exec_timeout_ms: std::env::var("EXEC_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(45000),
             source_generation: AtomicU64::new(0),
@@ -139,6 +187,17 @@ impl AppState {
 
     pub fn api_token(&self) -> &str {
         &self.api_token
+    }
+
+    // Everything the user may run right now: what we found on the system, the
+    // virtualenv living in the open project (uv/venv put one there, and it is
+    // almost always the right answer), then anything added by hand. Computed per
+    // request rather than cached because opening another project changes it.
+    fn available(&self) -> Interpreters {
+        let mut all = self.detected.clone();
+        all.merge(&workspace_interpreters(&self.ws()));
+        all.merge(&self.custom.read().unwrap_or_else(|e| e.into_inner()));
+        all
     }
 }
 
@@ -1879,22 +1938,58 @@ fn which(name: &str) -> Option<String> {
     None
 }
 
-// Discover every interpreter we can offer (conda envs, venvs, juliaup, ...).
+// Where a Python environment keeps its interpreter. Unix uses bin/python;
+// Windows differs by tool — conda writes python.exe at the env root, while
+// venv/virtualenv/uv put it under Scripts\ — so both have to be checked or
+// every .venv on Windows looks like "not found".
+fn python_in(dir: &Path) -> Option<String> {
+    let cands: [PathBuf; 3] = if cfg!(windows) {
+        [dir.join("python.exe"), dir.join("Scripts/python.exe"), dir.join("bin/python.exe")]
+    } else {
+        [dir.join("bin/python3"), dir.join("bin/python"), dir.join("python")]
+    };
+    cands.iter().find(|p| usable_binary(p)).map(|p| p.to_string_lossy().into_owned())
+}
+
+fn usable_binary(p: &Path) -> bool {
+    p.is_file()
+}
+
+// Windows registers "App Execution Aliases" for python/python3 under
+// WindowsApps: 0-byte reparse stubs that open the Microsoft Store rather than
+// running anything when Store Python isn't installed. One may well be first on
+// PATH, so prefer a real install and keep the alias as a last resort.
+fn is_store_alias(p: &Path) -> bool {
+    cfg!(windows)
+        && fs::metadata(p).map(|m| m.len() == 0).unwrap_or(false)
+        && p.to_string_lossy().to_lowercase().contains("windowsapps")
+}
+
+// Every immediate subdirectory, sorted, so listings are stable between launches.
+fn sorted_subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = fs::read_dir(dir) else { return Vec::new() };
+    let mut out: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    out.sort();
+    out
+}
+
+fn dir_name(p: &Path) -> String {
+    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+// Discover every interpreter we can offer (conda envs, venvs, uv, pyenv, ...).
 fn detect_interpreters() -> Interpreters {
     let home = dirs::home_dir().unwrap_or_default();
     let mut out = Interpreters::default();
 
-    // Interpreter binary layout differs by OS: bin/python (Unix) vs python.exe
-    // (Windows). Returns whichever exists under an env dir.
-    let py_in = |dir: &Path| -> Option<String> {
-        let p = if cfg!(windows) { dir.join("python.exe") } else { dir.join("bin/python") };
-        if p.is_file() { Some(p.to_string_lossy().into_owned()) } else { None }
-    };
-    let first_file = |cands: &[PathBuf]| cands.iter().find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned());
+    let py_in = |dir: &Path| python_in(dir);
+    let first_file = |cands: &[PathBuf]| cands.iter().find(|p| usable_binary(p)).map(|p| p.to_string_lossy().into_owned());
 
-    let base_py = which("python3")
-        .or_else(|| which("python"))
-        .or_else(|| if cfg!(windows) { which("py") } else { None })
+    let on_path = |name: &str| which(name).filter(|p| usable_binary(Path::new(p)));
+    let real_on_path = |name: &str| on_path(name).filter(|p| !is_store_alias(Path::new(p)));
+    let base_py = real_on_path("python3")
+        .or_else(|| real_on_path("python"))
+        .or_else(|| if cfg!(windows) { real_on_path("py") } else { None })
         .or_else(|| {
             let mut cands: Vec<PathBuf> = if cfg!(windows) {
                 vec![
@@ -1919,56 +2014,108 @@ fn detect_interpreters() -> Interpreters {
                 }
             }
             first_file(&cands)
-        });
+        })
+        // No real install anywhere: a Store alias still beats reporting that
+        // Python isn't on this machine at all.
+        .or_else(|| on_path("python3"))
+        .or_else(|| on_path("python"));
     if let Some(p) = base_py {
-        out.python.push(Interp { label: "Default (python)".into(), path: p });
+        out.python.push(Interp::found("Default (python)", p));
     }
 
     // conda / mamba environments — root locations differ per platform.
     let conda_roots: Vec<PathBuf> = if cfg!(windows) {
         ["miniconda3", "anaconda3", "mambaforge", "miniforge3"]
             .iter()
-            .flat_map(|r| vec![home.join(r), PathBuf::from(format!(r"C:\{r}")), PathBuf::from(format!(r"C:\ProgramData\{r}"))])
+            .flat_map(|r| {
+                vec![
+                    home.join(r),
+                    home.join("AppData/Local").join(r),
+                    PathBuf::from(format!(r"C:\{r}")),
+                    PathBuf::from(format!(r"C:\ProgramData\{r}")),
+                ]
+            })
             .collect()
     } else {
         ["miniconda3", "anaconda3", "mambaforge", "miniforge3"].iter().map(|r| home.join(r)).collect()
     };
     for root in &conda_roots {
-        let envs_dir = root.join("envs");
-        if let Ok(rd) = fs::read_dir(&envs_dir) {
-            let mut envs: Vec<_> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-            envs.sort();
-            for env in envs {
-                if let Some(p) = py_in(&envs_dir.join(&env)) {
-                    out.python.push(Interp { label: format!("conda: {env}"), path: p });
-                }
+        for env in sorted_subdirs(&root.join("envs")) {
+            if let Some(p) = py_in(&env) {
+                out.python.push(Interp::found(format!("conda: {}", dir_name(&env)), p));
             }
         }
     }
 
-    let venv_dir = home.join(".virtualenvs");
-    if let Ok(rd) = fs::read_dir(&venv_dir) {
-        let mut envs: Vec<_> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-        envs.sort();
-        for env in envs {
-            if let Some(p) = py_in(&venv_dir.join(&env)) {
-                out.python.push(Interp { label: format!("venv: {env}"), path: p });
+    // Virtualenv collections: virtualenvwrapper's ~/.virtualenvs and the plain
+    // ~/.venvs a lot of people keep by hand.
+    for (kind, dir) in [("venv", home.join(".virtualenvs")), ("venv", home.join(".venvs"))] {
+        for env in sorted_subdirs(&dir) {
+            if let Some(p) = py_in(&env) {
+                out.python.push(Interp::found(format!("{kind}: {}", dir_name(&env)), p));
             }
         }
     }
 
-    let jl = which("julia").or_else(|| {
+    // uv's own Python builds. uv keeps them under its data directory, which is
+    // XDG_DATA_HOME (or ~/.local/share) on Unix and %APPDATA%\uv\data on Windows.
+    let uv_roots: Vec<PathBuf> = if cfg!(windows) {
+        vec![home.join("AppData/Roaming/uv/data/python"), home.join("AppData/Local/uv/data/python")]
+    } else {
+        let mut roots = vec![home.join(".local/share/uv/python")];
+        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            roots.insert(0, PathBuf::from(xdg).join("uv/python"));
+        }
+        roots
+    };
+    for root in &uv_roots {
+        for env in sorted_subdirs(root) {
+            if let Some(p) = py_in(&env) {
+                out.python.push(Interp::found(format!("uv: {}", dir_name(&env)), p));
+            }
+        }
+    }
+
+    // pyenv versions (pyenv-win keeps the same layout one level deeper).
+    for root in [home.join(".pyenv/versions"), home.join(".pyenv/pyenv-win/versions")] {
+        for env in sorted_subdirs(&root) {
+            if let Some(p) = py_in(&env) {
+                out.python.push(Interp::found(format!("pyenv: {}", dir_name(&env)), p));
+            }
+        }
+    }
+
+    let mut jl = on_path("julia").or_else(|| {
         first_file(&if cfg!(windows) {
-            vec![home.join(".juliaup/bin/julia.exe"), home.join("AppData/Local/Programs/Julia/bin/julia.exe")]
+            vec![
+                home.join(".juliaup/bin/julia.exe"),
+                home.join("AppData/Local/Programs/Julia/bin/julia.exe"),
+                home.join("AppData/Local/Microsoft/WindowsApps/julia.exe"),
+            ]
         } else {
             vec![home.join(".juliaup/bin/julia"), PathBuf::from("/opt/homebrew/bin/julia"), PathBuf::from("/usr/local/bin/julia")]
         })
     });
+    // Windows installers drop a versioned folder (Julia-1.11.2\bin\julia.exe)
+    // rather than a fixed path, so fall back to scanning for the newest one.
+    if jl.is_none() && cfg!(windows) {
+        for parent in [home.join("AppData/Local/Programs"), PathBuf::from(r"C:\")] {
+            let mut versioned: Vec<PathBuf> = sorted_subdirs(&parent)
+                .into_iter()
+                .filter(|d| dir_name(d).to_lowercase().starts_with("julia"))
+                .collect();
+            versioned.reverse();
+            jl = versioned.iter().map(|d| d.join("bin/julia.exe")).find(|p| usable_binary(p)).map(|p| p.to_string_lossy().into_owned());
+            if jl.is_some() {
+                break;
+            }
+        }
+    }
     if let Some(p) = jl {
-        out.julia.push(Interp { label: "Default (julia)".into(), path: p });
+        out.julia.push(Interp::found("Default (julia)", p));
     }
 
-    let wl = which("wolframscript").or_else(|| {
+    let wl = on_path("wolframscript").or_else(|| {
         first_file(&if cfg!(windows) {
             vec![PathBuf::from(r"C:\Program Files\Wolfram Research\WolframScript\wolframscript.exe")]
         } else {
@@ -1976,23 +2123,242 @@ fn detect_interpreters() -> Interpreters {
         })
     });
     if let Some(p) = wl {
-        out.wolfram.push(Interp { label: "WolframScript".into(), path: p });
+        out.wolfram.push(Interp::found("WolframScript", p));
+    }
+
+    // The same interpreter often turns up twice (the one on PATH is also the one
+    // pyenv or conda manages). Keep the first, most descriptive entry.
+    for lang in ["python", "julia", "wolfram"] {
+        if let Some(list) = out.for_lang_mut(lang) {
+            let mut seen: Vec<String> = Vec::new();
+            list.retain(|i| {
+                if seen.iter().any(|s| same_path(s, &i.path)) {
+                    return false;
+                }
+                seen.push(i.path.clone());
+                true
+            });
+        }
     }
 
     out
 }
 
+// The environment belonging to the project that's open. `uv venv`, `python -m
+// venv` and Poetry all create one of these in the project root, and it is the
+// interpreter a reproducibility-minded user actually wants — so offer it without
+// making them hunt for the path.
+fn workspace_interpreters(ws: &Path) -> Interpreters {
+    let mut out = Interpreters::default();
+    for name in [".venv", "venv", ".env", "env"] {
+        let dir = ws.join(name);
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Some(p) = python_in(&dir) {
+            out.python.push(Interp::found(format!("project: {name}"), p));
+        }
+    }
+    out
+}
+
+fn custom_interpreters_file() -> PathBuf {
+    if let Ok(p) = std::env::var("HILBERT_INTERPRETERS_FILE") {
+        return PathBuf::from(p);
+    }
+    dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+        .join("hilbert")
+        .join("interpreters.json")
+}
+
+// Stored as { "python": [{ "label": …, "path": … }], … }. Entries whose binary
+// has since been deleted are dropped on load so a stale list can't be executed.
+fn load_custom_interpreters() -> Interpreters {
+    let mut out = Interpreters::default();
+    let Ok(raw) = fs::read_to_string(custom_interpreters_file()) else { return out };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else { return out };
+    for lang in ["python", "julia", "wolfram"] {
+        let Some(entries) = v.get(lang).and_then(|e| e.as_array()) else { continue };
+        let list: Vec<Interp> = entries
+            .iter()
+            .filter_map(|e| {
+                let path = e.get("path")?.as_str()?.to_string();
+                if !usable_binary(Path::new(&path)) {
+                    return None;
+                }
+                let label = e.get("label").and_then(|l| l.as_str()).unwrap_or("custom").to_string();
+                Some(Interp { label, path, custom: true })
+            })
+            .collect();
+        if let Some(slot) = out.for_lang_mut(lang) {
+            *slot = list;
+        }
+    }
+    out
+}
+
+fn save_custom_interpreters(all: &Interpreters) -> std::io::Result<()> {
+    let path = custom_interpreters_file();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let body = json!({ "python": all.python, "julia": all.julia, "wolfram": all.wolfram });
+    fs::write(path, serde_json::to_vec_pretty(&body).unwrap_or_default())
+}
+
+// Name an environment after the folder that owns it, so a list of a dozen
+// project venvs stays readable: …/proj/.venv/bin/python → "proj".
+fn env_name_for(path: &Path) -> String {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "custom".into());
+    let mut dir = path.parent();
+    // Step over bin/ or Scripts/ to reach the environment root.
+    if dir.map(|d| matches!(dir_name(d).as_str(), "bin" | "Scripts")).unwrap_or(false) {
+        dir = dir.and_then(|d| d.parent());
+    }
+    let Some(dir) = dir else { return stem };
+    let name = dir_name(dir);
+    // A venv folder is named after the convention, not the project, so it says
+    // nothing on its own — borrow the name of the folder holding it.
+    let is_venv_marker = matches!(name.as_str(), "venv" | "env") || name.starts_with(".venv") || name.starts_with(".env");
+    if is_venv_marker {
+        let parent = dir.parent().map(dir_name).unwrap_or_default();
+        if !parent.is_empty() {
+            return parent;
+        }
+    }
+    // A binary sitting in a system prefix (/usr/local/bin/julia) has no
+    // environment to name it after; the binary's own name is more use.
+    let generic = name.is_empty() || matches!(name.to_lowercase().as_str(), "usr" | "local" | "opt" | "programs" | "program files" | "bin");
+    if generic {
+        return stem;
+    }
+    name.trim_start_matches('.').to_string()
+}
+
+// Check a hand-entered interpreter before we agree to run it: it must exist, be
+// executable, and answer --version. The version goes into the label so the list
+// distinguishes several environments at a glance.
+async fn probe_interpreter(lang: &str, path: &str) -> Result<Interp, String> {
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return Err("Enter the full path to the interpreter.".into());
+    }
+    if !usable_binary(p) {
+        return Err(format!("No executable file at {path}."));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = fs::metadata(p).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false);
+        if !executable {
+            return Err(format!("{path} is not executable."));
+        }
+    }
+    let arg = if lang == "wolfram" { "-version" } else { "--version" };
+    let out = run_cmd(path, &[arg], None, Some(15_000))
+        .await
+        .map_err(|e| format!("Could not run {path}: {e}"))?;
+    if out.killed {
+        return Err(format!("{path} did not respond to {arg} within 15 s."));
+    }
+    let banner = out.stdout.lines().chain(out.stderr.lines()).map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    if out.code != Some(0) || banner.is_empty() {
+        return Err(format!("{path} did not look like a working {lang} interpreter."));
+    }
+    // Every one of these names itself in its version banner ("Python 3.12.1",
+    // "julia version 1.11.2", "WolframScript 1.10"), so this catches pointing
+    // the Python slot at, say, a Julia binary before a run fails confusingly.
+    if !banner.to_lowercase().contains(lang) {
+        return Err(format!("That looks like \"{banner}\", not {lang}. Pick the {lang} executable itself."));
+    }
+    // "Python 3.12.1" / "julia version 1.11.2" → just the number.
+    let version = banner.split_whitespace().find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit())).unwrap_or(banner);
+    Ok(Interp { label: format!("{} ({version})", env_name_for(p)), path: path.to_string(), custom: true })
+}
+
 async fn tools(State(st): St) -> Response {
+    let all = st.available();
     Json(json!({
         "execEnabled": st.allow_exec,
-        "interpreters": st.interpreters,
+        "interpreters": all,
         "available": {
-            "python": !st.interpreters.python.is_empty(),
-            "julia": !st.interpreters.julia.is_empty(),
-            "wolfram": !st.interpreters.wolfram.is_empty(),
+            "python": !all.python.is_empty(),
+            "julia": !all.julia.is_empty(),
+            "wolfram": !all.wolfram.is_empty(),
         }
     }))
     .into_response()
+}
+
+// Add an interpreter the user pointed us at. Registering it here is what later
+// lets /exec run it: the runner only ever launches a path present in this list.
+async fn tools_interpreter_add(State(st): St, body: Bytes) -> Response {
+    let v = parse_json(&body);
+    let lang = jstr(&v, "lang").unwrap_or("").to_string();
+    let path = jstr(&v, "path").unwrap_or("").trim().to_string();
+    if !matches!(lang.as_str(), "python" | "julia" | "wolfram") {
+        return json_err(StatusCode::BAD_REQUEST, "Choose python, julia, or wolfram.");
+    }
+    if path.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "Give the path to the interpreter.");
+    }
+    let interp = match probe_interpreter(&lang, &path).await {
+        Ok(i) => i,
+        Err(message) => return json_err(StatusCode::BAD_REQUEST, message),
+    };
+    {
+        let mut custom = st.custom.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(list) = custom.for_lang_mut(&lang) {
+            list.retain(|i| !same_path(&i.path, &interp.path));
+            list.push(interp.clone());
+        }
+        if let Err(e) = save_custom_interpreters(&custom) {
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save the interpreter list: {e}"));
+        }
+    }
+    Json(json!({ "ok": true, "interpreter": interp })).into_response()
+}
+
+async fn tools_interpreter_remove(State(st): St, body: Bytes) -> Response {
+    let v = parse_json(&body);
+    let lang = jstr(&v, "lang").unwrap_or("").to_string();
+    let path = jstr(&v, "path").unwrap_or("").to_string();
+    let mut custom = st.custom.write().unwrap_or_else(|e| e.into_inner());
+    let Some(list) = custom.for_lang_mut(&lang) else {
+        return json_err(StatusCode::BAD_REQUEST, "Choose python, julia, or wolfram.");
+    };
+    list.retain(|i| !same_path(&i.path, &path));
+    if let Err(e) = save_custom_interpreters(&custom) {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save the interpreter list: {e}"));
+    }
+    Json(json!({ "ok": true })).into_response()
+}
+
+// Native "browse for the executable" picker. Returns the path only; the caller
+// still has to add it, so a mistaken pick fails with a readable message.
+async fn tools_interpreter_pick(State(st): St, body: Bytes) -> Response {
+    let v = parse_json(&body);
+    let lang = jstr(&v, "lang").unwrap_or("python").to_string();
+    let app = st.app.lock().unwrap().clone();
+    let Some(app) = app else {
+        return Json(json!({ "path": null, "noDialog": true })).into_response();
+    };
+    let picked = tokio::task::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        let mut dialog = app.dialog().file().set_title(format!("Choose a {lang} interpreter"));
+        // Windows hides extensionless files behind a filter, and every
+        // interpreter there ends in .exe; elsewhere the binary has no extension.
+        if cfg!(windows) {
+            dialog = dialog.add_filter("Executable", &["exe", "bat", "cmd"]);
+        }
+        dialog.blocking_pick_file()
+    })
+    .await
+    .ok()
+    .flatten();
+    let path = picked.and_then(|fp| fp.into_path().ok()).map(|p| p.to_string_lossy().into_owned());
+    Json(json!({ "path": path })).into_response()
 }
 
 fn ext_for(lang: &str) -> Option<&'static str> {
@@ -2196,9 +2562,11 @@ async fn run_code(State(st): St, body: Bytes) -> Response {
         code = wrap_for_equation(lang, &code);
     }
 
-    // Pick the interpreter: an explicit path if it is one we detected, else the default.
-    let options = st.interpreters.for_lang(lang);
-    let Some(chosen) = options.iter().find(|o| o.path == bin).or_else(|| options.first()) else {
+    // Pick the interpreter: an explicit path if it is one we know about (detected,
+    // in the project, or added by the user), else the default.
+    let known = st.available();
+    let options = known.for_lang(lang);
+    let Some(chosen) = options.iter().find(|o| same_path(&o.path, bin)).or_else(|| options.first()) else {
         return json_err(StatusCode::BAD_REQUEST, format!("{lang} is not available on this system."));
     };
     let Ok(_permit) = st.exec_gate.acquire().await else {
@@ -2365,8 +2733,9 @@ async fn notebook_run(State(st): St, body: Bytes) -> Response {
             return json_err(StatusCode::BAD_REQUEST, format!("Cell {} blocked for safety: code uses \"{}\" (process/network/filesystem access is not allowed).", i + 1, blocked));
         }
     }
-    let options = st.interpreters.for_lang(lang);
-    let Some(chosen) = options.iter().find(|o| o.path == bin).or_else(|| options.first()) else {
+    let known = st.available();
+    let options = known.for_lang(lang);
+    let Some(chosen) = options.iter().find(|o| same_path(&o.path, bin)).or_else(|| options.first()) else {
         return json_err(StatusCode::BAD_REQUEST, format!("{lang} is not available on this system."));
     };
     let Ok(_permit) = st.exec_gate.acquire().await else {
@@ -3754,6 +4123,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/export/project/native", post(export_project_native))
         .route("/webdav/sync", post(webdav_sync))
         .route("/tools", get(tools))
+        .route("/tools/interpreter", post(tools_interpreter_add))
+        .route("/tools/interpreter/remove", post(tools_interpreter_remove))
+        .route("/tools/interpreter/pick", post(tools_interpreter_pick))
         .route("/run", post(run_code))
         .route("/notebook/run", post(notebook_run))
         .route("/template/preview", get(template_preview))

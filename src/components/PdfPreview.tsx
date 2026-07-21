@@ -130,18 +130,31 @@ function PdfPreview(
 
   // (Re)build the transparent text layers at the current scale so cursor↔PDF sync
   // can locate words even on pages whose bitmap isn't drawn yet.
+  //
+  // Each zoom step starts a fresh pass while the previous one may still be
+  // walking the pages, so passes are numbered and a superseded one stops: without
+  // that, an older pass finishing last leaves layers built for the old scale, and
+  // then double-click-to-source lands on the wrong word.
+  const textPassRef = useRef(0);
   const renderTextLayers = async (token: number) => {
     const doc = docCache.current.doc, slots = slotsRef.current;
     if (!doc) return;
+    const pass = ++textPassRef.current;
     const dScale = scaleRef.current.dScale;
     for (let i = 1; i <= slots.length; i++) {
       const page = await doc.getPage(i);
-      if (token !== renderTokenRef.current) return;
+      if (token !== renderTokenRef.current || pass !== textPassRef.current) return;
       const td = slots[i - 1].textDiv;
       td.replaceChildren();
       td.style.setProperty('--scale-factor', String(dScale));
       const tl = new TextLayer({ textContentSource: page.streamTextContent(), container: td, viewport: page.getViewport({ scale: dScale }) });
       await tl.render();
+      if (pass !== textPassRef.current) return;
+      // pdf.js writes a pixel width/height onto the container. Drop them so the
+      // stylesheet's inset:0 keeps the layer exactly on its page — an oversized
+      // one is invisible but still widens the scroll area.
+      td.style.width = '';
+      td.style.height = '';
     }
   };
 
@@ -162,6 +175,37 @@ function PdfPreview(
   }, []);
 
   const setZoom = (z: number) => { setZoomFactor(z); zoomFactorRef.current = z; applyWidths(liveWRef.current, z); scheduleRaster(); };
+
+  // Ctrl/⌘ + wheel zooms instead of scrolling, the way every PDF viewer does —
+  // and a trackpad pinch reaches the page as exactly that event, so both
+  // gestures land here. The listener must be non-passive: preventDefault is what
+  // stops the browser zooming the whole app instead.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (ev: WheelEvent) => {
+      if (!ev.ctrlKey && !ev.metaKey) return;
+      ev.preventDefault();
+      // deltaMode 1 counts lines rather than pixels. Scaling exponentially keeps
+      // a pinch smooth while one wheel notch still moves about as much as the
+      // toolbar's +/- buttons.
+      const perUnit = ev.deltaMode === 1 ? 30 : 1;
+      const prev = zoomFactorRef.current;
+      const next = Math.min(Math.max(prev * Math.exp(-ev.deltaY * perUnit * 0.0015), 0.25), 8);
+      if (Math.abs(next - prev) < 0.0005) return;
+      // Keep whatever is under the pointer under the pointer: pages grow from
+      // the top-left, so both scroll offsets scale by the same ratio.
+      const rect = el.getBoundingClientRect();
+      const ox = ev.clientX - rect.left, oy = ev.clientY - rect.top;
+      const x = el.scrollLeft + ox, y = el.scrollTop + oy;
+      setZoom(next);
+      const ratio = next / prev;
+      el.scrollLeft = x * ratio - ox;
+      el.scrollTop = y * ratio - oy;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
 
   // Only pages within ~one screen of the viewport hold a bitmap; the rest stay as
   // placeholders. This observer draws them as they scroll near. Reused across both
@@ -435,7 +479,7 @@ function PdfPreview(
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
         </button>
         <button className="pdf-btn" onClick={() => setZoom(Math.max(zoomFactor / 1.15, 0.25))} title="Zoom out">−</button>
-        <select className="pdf-zoom-select" value={selValue} title="Zoom (100% = fit width)"
+        <select className="pdf-zoom-select" value={selValue} title="Zoom (100% = fit width) — Ctrl/⌘ + scroll over the page also zooms"
           onChange={e => setZoom(e.target.value === 'fit' ? 1 : Number(e.target.value) / 100)}>
           <option value="fit">Fit</option>
           {!PRESETS.includes(curPct) && !isFit && <option value={String(curPct)}>{curPct}%</option>}
@@ -449,7 +493,7 @@ function PdfPreview(
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
         </button>
       </div>
-      <div className="pdf-scroll" ref={scrollRef} onDoubleClick={handleDblClick} title="Double-click a word to jump to it in the source">
+      <div className="pdf-scroll" ref={scrollRef} onDoubleClick={handleDblClick} title="Double-click a word to jump to it in the source · Ctrl/⌘ + scroll to zoom">
         <div className="pdf-pages" ref={pagesRef} />
       </div>
     </div>
