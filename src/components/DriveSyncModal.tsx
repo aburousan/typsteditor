@@ -51,8 +51,30 @@ async function uploadFile(token: string, folderId: string, name: string, content
   });
 }
 
-export default function DriveSyncModal({ onClose, projectName = 'Typst Project' }: { onClose: () => void, projectName?: string }) {
-  const [mode, setMode] = useState<'google' | 'webdav' | 'local'>('google');
+type LiveSession = {
+  file: string;
+  peers: number;
+  status: string;
+};
+
+export default function DriveSyncModal({
+  onClose,
+  projectName = 'Typst Project',
+  liveSession,
+  onHostLive,
+  onJoinLive,
+  onCopyLiveInvite,
+  onLeaveLive,
+}: {
+  onClose: () => void;
+  projectName?: string;
+  liveSession?: LiveSession | null;
+  onHostLive: () => void;
+  onJoinLive: () => void;
+  onCopyLiveInvite: () => void;
+  onLeaveLive: () => void;
+}) {
+  const [mode, setMode] = useState<'live' | 'google' | 'webdav' | 'local'>('live');
   const [folder, setFolder] = useState('');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
@@ -125,15 +147,47 @@ export default function DriveSyncModal({ onClose, projectName = 'Typst Project' 
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content" style={{ width: '460px' }} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
-          <h2>Sync Project</h2>
+          <h2>Share &amp; Sync</h2>
           <button className="close-btn" onClick={onClose}>×</button>
         </div>
         <div className="modal-body">
           <div className="seg">
+            <button className={mode === 'live' ? 'active' : ''} onClick={() => { setMode('live'); setStatus(''); }}>Live</button>
             <button className={mode === 'google' ? 'active' : ''} onClick={() => { setMode('google'); setStatus(''); }}>Google Drive</button>
             <button className={mode === 'webdav' ? 'active' : ''} onClick={() => { setMode('webdav'); setStatus(''); }}>WebDAV</button>
             <button className={mode === 'local' ? 'active' : ''} onClick={() => { setMode('local'); setStatus(''); }}>Local folder</button>
           </div>
+
+          {mode === 'live' && (
+            <>
+              <p className="form-hint">
+                Edit the open text file together without an account or central Hilbert service.
+                Updates and cursors are encrypted before they reach the direct campus/LAN listener
+                or your optional self-hosted relay.
+              </p>
+              {liveSession ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div style={{ padding: 10, borderRadius: 7, border: '1px solid rgba(52, 211, 153, 0.4)', background: 'rgba(16, 185, 129, 0.08)', fontSize: '0.82rem', lineHeight: 1.45 }}>
+                    <b>Encrypted session active</b><br />
+                    <code>{liveSession.file}</code> · {liveSession.peers} participant{liveSession.peers === 1 ? '' : 's'} · {liveSession.status}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn-primary" onClick={() => { onCopyLiveInvite(); onClose(); }}>Copy invitation</button>
+                    <button className="btn-ghost" onClick={() => { onLeaveLive(); onClose(); }}>Leave session</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button className="btn-primary" onClick={() => { onClose(); onHostLive(); }}>Host this file</button>
+                  <button className="btn-ghost" onClick={() => { onClose(); onJoinLive(); }}>Join with invitation</button>
+                </div>
+              )}
+              <p className="form-hint">
+                Direct hosting normally uses port 3020. The host must stay online, and the invitation
+                should be shared only with intended collaborators because it contains the temporary decryption key.
+              </p>
+            </>
+          )}
 
           {mode === 'webdav' && (
             <>

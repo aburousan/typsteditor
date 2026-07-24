@@ -291,6 +291,23 @@ init, commit, and push to GitHub. There's also sync to a local folder, Google Dr
 or WebDAV (Nextcloud and ownCloud), and a package manager to search, download, and
 remove Typst packages.
 
+Live collaboration is offline-first and account-free. From the command palette, host
+the open text file on the detected campus/LAN address and share the generated
+invitation, or paste an invitation to join. Hilbert starts a separate collaboration-only
+listener (port 3020 when available); it never exposes the workspace API. Yjs updates,
+presence, and cursors are encrypted end to end with the one-session key in the
+invitation. A user-operated relay can be selected instead by setting its `ws://` or
+`wss://` address. The standalone relay is:
+
+```sh
+hilbert --sync-server --port 3020
+```
+
+The host must remain online for a direct session. Everyone's ordinary project file
+continues to save locally, and reconnection merges live CRDT updates while the session
+is active. For step-by-step setup, including the single-router, campus, and dedicated
+relay cases, see [docs/COLLABORATION.md](docs/COLLABORATION.md).
+
 ### Reliability and platform
 
 The auto-updater (Tauri build) checks on launch and asks before installing. If the
@@ -460,6 +477,12 @@ The backend is built for local, single-user use:
   `HILBERT_API_TOKEN=<32+ chars>` in the environment, then send
   `Authorization: Bearer <token>` with each request.
 - File access is confined to the workspace, and path traversal is rejected.
+- The collaboration listener is a separate binary-only relay with bounded rooms,
+  peers, frame size, and traffic rate. Document and awareness frames are AES-GCM
+  encrypted in the clients; the relay receives only ciphertext. Invitations contain
+  the temporary decryption key, so share them only with intended collaborators.
+  Set `HILBERT_COLLAB=0` to not start the listener at all, and `HILBERT_COLLAB_PORT`
+  to move it off 3020.
 - Code execution can be turned off (`ALLOW_CODE_EXECUTION=0`). When on, it is
   time-limited, runs in a scratch directory under `.hilbert/run/` with OS resource
   limits on file size and CPU, has its output capped, and is screened for process,

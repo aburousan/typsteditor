@@ -3,7 +3,10 @@
 // frontend build works exactly as it does under Electron + Express.
 use axum::{
     body::Bytes,
-    extract::{DefaultBodyLimit, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        DefaultBodyLimit, Query, State,
+    },
     http::{header, HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -812,6 +815,151 @@ async fn workspace_reveal(State(st): St, body: Bytes) -> Response {
     }
     reveal_in_file_manager(&target);
     Json(json!({ "ok": true })).into_response()
+}
+
+// --- Live collaboration relay ------------------------------------------------
+//
+// A per-room broadcast relay for Yjs sync + awareness. Clients (each a Hilbert
+// window) connect to /collab/<room> and everything one sends is forwarded to the
+// others in the same room; they run the CRDT sync handshake peer-to-peer through
+// it. The relay never inspects or stores document data — it only shuttles the
+// clients' AES-GCM encrypted frames, so it stays dumb and content-blind.
+//
+// The room id is the shared secret: only someone with the invite can join. This
+// same handler backs both a peer hosting on the LAN and a Hilbert run purely as
+// a sync server (see sync_server_main), so collaborators point at one address.
+struct CollabRooms {
+    rooms: HashMap<String, (tokio::sync::broadcast::Sender<(u64, Bytes)>, usize)>,
+}
+static COLLAB: LazyLock<Mutex<CollabRooms>> =
+    LazyLock::new(|| Mutex::new(CollabRooms { rooms: HashMap::new() }));
+static COLLAB_CLIENT: AtomicU64 = AtomicU64::new(1);
+
+const COLLAB_MAX_ROOMS: usize = 256;
+const COLLAB_MAX_PEERS_PER_ROOM: usize = 32;
+const COLLAB_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const COLLAB_MAX_BYTES_PER_SECOND: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Default, serde::Serialize)]
+struct EmbeddedCollabInfo {
+    available: bool,
+    port: Option<u16>,
+    urls: Vec<String>,
+}
+
+static EMBEDDED_COLLAB: LazyLock<RwLock<EmbeddedCollabInfo>> =
+    LazyLock::new(|| RwLock::new(EmbeddedCollabInfo::default()));
+
+pub fn set_embedded_collab_server(port: u16, addresses: Vec<String>) {
+    let urls = addresses
+        .into_iter()
+        .map(|address| {
+            if address.contains(':') {
+                format!("ws://[{address}]:{port}")
+            } else {
+                format!("ws://{address}:{port}")
+            }
+        })
+        .collect();
+    *EMBEDDED_COLLAB.write().unwrap() = EmbeddedCollabInfo {
+        available: true,
+        port: Some(port),
+        urls,
+    };
+}
+
+async fn collab_server_info() -> Response {
+    Json(EMBEDDED_COLLAB.read().unwrap().clone()).into_response()
+}
+
+fn valid_collab_room(room: &str) -> bool {
+    (16..=128).contains(&room.len())
+        && room
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn collab_join(room: &str) -> Option<tokio::sync::broadcast::Sender<(u64, Bytes)>> {
+    let mut g = COLLAB.lock().unwrap();
+    if let Some((sender, peers)) = g.rooms.get_mut(room) {
+        if *peers >= COLLAB_MAX_PEERS_PER_ROOM {
+            return None;
+        }
+        *peers += 1;
+        return Some(sender.clone());
+    }
+    if g.rooms.len() >= COLLAB_MAX_ROOMS {
+        return None;
+    }
+    let entry = g.rooms.entry(room.to_string()).or_insert_with(|| {
+        // Clients re-request CRDT state on their periodic resync, so a lagged
+        // peer recovers on its own. Keep the ring buffer small: it retains its
+        // most recent entries either way, and at the 1 MiB frame limit a large
+        // capacity would let one room pin hundreds of megabytes.
+        (tokio::sync::broadcast::channel(128).0, 0)
+    });
+    entry.1 += 1;
+    Some(entry.0.clone())
+}
+
+fn collab_leave(room: &str) {
+    let mut g = COLLAB.lock().unwrap();
+    if let Some(entry) = g.rooms.get_mut(room) {
+        entry.1 = entry.1.saturating_sub(1);
+        if entry.1 == 0 {
+            g.rooms.remove(room);
+        }
+    }
+}
+
+async fn collab_ws(ws: WebSocketUpgrade, axum::extract::Path(room): axum::extract::Path<String>) -> Response {
+    if !valid_collab_room(&room) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    ws.max_message_size(COLLAB_MAX_MESSAGE_BYTES)
+        .max_frame_size(COLLAB_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| collab_socket(socket, room))
+}
+
+async fn collab_socket(mut socket: WebSocket, room: String) {
+    let Some(tx) = collab_join(&room) else {
+        return;
+    };
+    let mut rx = tx.subscribe();
+    let id = COLLAB_CLIENT.fetch_add(1, Ordering::Relaxed);
+    let mut rate_window = Instant::now();
+    let mut bytes_in_window = 0usize;
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Binary(data))) => {
+                    if rate_window.elapsed() >= Duration::from_secs(1) {
+                        rate_window = Instant::now();
+                        bytes_in_window = 0;
+                    }
+                    bytes_in_window = bytes_in_window.saturating_add(data.len());
+                    if bytes_in_window > COLLAB_MAX_BYTES_PER_SECOND {
+                        break;
+                    }
+                    let _ = tx.send((id, data));
+                }
+                // The Yjs transport is binary-only. Rejecting text avoids
+                // ambiguous transcoding and keeps message accounting exact.
+                Some(Ok(Message::Text(_))) => break,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => {} // ping/pong is handled by axum
+            },
+            relayed = rx.recv() => match relayed {
+                Ok((from, data)) if from != id => {
+                    if socket.send(Message::Binary(data)).await.is_err() { break; }
+                }
+                Ok(_) => {} // our own message echoed back — skip
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {} // peer resyncs from CRDT
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
+        }
+    }
+    collab_leave(&room);
 }
 
 async fn app_new_window(State(st): St) -> Response {
@@ -4713,6 +4861,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/workspace/rename", post(workspace_rename))
         .route("/workspace/reveal", post(workspace_reveal))
         .route("/app/new-window", post(app_new_window))
+        .route("/collab/info", get(collab_server_info))
         .route("/workspace/search", get(workspace_search))
         .route("/workspace/raw", get(workspace_raw))
         .route("/workspace/compress", post(workspace_compress))
@@ -4768,6 +4917,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_guard));
 
     let app = Router::new().merge(api);
+    // Collaboration relay: outside the bearer-token guard, because a peer joining
+    // from another window or machine has no copy of this backend's token — the
+    // secret room id gates access instead.
+    let app = app.route("/collab/{room}", get(collab_ws));
     #[cfg(debug_assertions)]
     let app = app.route("/auth/dev-token", get(dev_api_token));
 
@@ -4793,6 +4946,18 @@ pub async fn shutdown_children(state: &Arc<AppState>) {
 // are shared per-workspace across windows and stay for the survivors.
 pub async fn shutdown_window(state: &Arc<AppState>) {
     stop_preview_watcher(state).await;
+}
+
+// A Hilbert run purely as a collaboration server: just the relay, bound to all
+// interfaces so collaborators on the LAN (or a server on the campus/internet)
+// can reach it by address. No workspace, no file API — only /collab/<room>.
+pub async fn serve_sync_server(listener: std::net::TcpListener) {
+    listener.set_nonblocking(true).expect("nonblocking");
+    let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+    let app = Router::new().route("/collab/{room}", get(collab_ws));
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("[hilbert-sync] server error: {e}");
+    }
 }
 
 pub async fn serve(listener: std::net::TcpListener, state: Arc<AppState>) {
@@ -4869,5 +5034,17 @@ mod tests {
         assert!(!valid_bearer(&headers, "fixed-token"));
         headers.insert(header::AUTHORIZATION, "Bearer fixed-token".parse().unwrap());
         assert!(valid_bearer(&headers, "fixed-token"));
+    }
+
+    #[test]
+    fn collaboration_room_ids_are_bounded_and_path_safe() {
+        assert!(valid_collab_room("0123456789abcdef"));
+        assert!(valid_collab_room(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!valid_collab_room("too-short"));
+        assert!(!valid_collab_room("0123456789abcde/"));
+        assert!(!valid_collab_room("0123456789abcde?"));
+        assert!(!valid_collab_room(&"a".repeat(129)));
     }
 }

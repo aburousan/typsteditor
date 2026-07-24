@@ -20,6 +20,7 @@
     "desktop": "npm run build && cd src-tauri && cargo run",
     "build": "tsc -b && vite build && node scripts/strip-bundled-secrets.mjs",
     "test:backend": "cd src-tauri && cargo test",
+    "test:collab": "node scripts/test-collab-protocol.mjs",
     "test:unicode": "node scripts/test-unicode-ranges.mjs",
     "test:comments": "node scripts/test-comment-lines.mjs",
     "lint": "oxlint",
@@ -27,7 +28,11 @@
   },
   "dependencies": {
     "@excalidraw/excalidraw": "^0.18.1",
-    "react-image-crop": "^11.1.2"
+    "react-image-crop": "^11.1.2",
+    "y-monaco": "^0.1.6",
+    "y-protocols": "^1.0.7",
+    "y-websocket": "^3.0.0",
+    "yjs": "^13.6.31"
   },
   "devDependencies": {
     "@monaco-editor/react": "^4.7.0",

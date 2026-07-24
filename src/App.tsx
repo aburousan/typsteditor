@@ -47,6 +47,7 @@ import Boundary from './components/Boundary';
 import Toaster from './components/Toaster';
 import ExternalChangeModal, { type ExternalConflict } from './components/ExternalChangeModal';
 import { notify } from './notify';
+import type { CollabHandle, CollabStatus } from './collab';
 import './index.css';
 
 const SURFACE_3D_TEMPLATE = `import matplotlib
@@ -510,6 +511,16 @@ export default function App() {
   const [projectName, setProjectName] = useState('Project Report');
   const [editingTitle, setEditingTitle] = useState(false);
   const [inputModal, setInputModal] = useState<InputModalConfig | null>(null);
+  // Live collaboration on the open file (Yjs). Dormant until Host/Join is used.
+  const collabRef = useRef<CollabHandle | null>(null);
+  const [collab, setCollab] = useState<{
+    room: string;
+    ticket: string;
+    file: string;
+    peers: number;
+    status: CollabStatus;
+  } | null>(null);
+  const configuredCollabServer = () => localStorage.getItem('collab_server') || '';
   const [confirmModal, setConfirmModal] = useState<null | { message: string; danger?: boolean; confirmLabel?: string; resolve: (ok: boolean) => void }>(null);
   const confirmDialog = useCallback((message: string, opts?: { danger?: boolean; confirmLabel?: string }) =>
     new Promise<boolean>(resolve => setConfirmModal({ message, danger: opts?.danger, confirmLabel: opts?.confirmLabel, resolve })), []);
@@ -3645,6 +3656,170 @@ export default function App() {
       notify('Could not reach Hilbert to open a new window.');
     }
   };
+
+  // A stable-ish identity for this session's cursor: a friendly name and a colour
+  // derived from it, so a peer keeps the same colour across reconnects.
+  const collabIdentity = () => {
+    let name = localStorage.getItem('collab_name') || '';
+    if (!name) { name = `Guest ${Math.floor(Math.random() * 900 + 100)}`; localStorage.setItem('collab_name', name); }
+    const palette = ['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+    let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+    return { name, color: palette[h % palette.length] };
+  };
+
+  const beginCollab = async (
+    invite: { url: string; room: string; key: string },
+    mode: 'host' | 'join',
+  ) => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (!editor || !model) { notify('Open a file before starting collaboration.'); return; }
+    collabRef.current?.stop();
+    setCollab(null);
+    try {
+      const { startCollab } = await import('./collab');
+      const sharedFile = activeTabPath;
+      const handle = startCollab({
+        invite,
+        mode,
+        model,
+        editor,
+        user: collabIdentity(),
+        seedContent: mode === 'host' ? model.getValue() : undefined,
+      });
+      collabRef.current = handle;
+      setCollab({
+        room: invite.room,
+        ticket: handle.ticket,
+        file: sharedFile,
+        peers: 1,
+        status: 'connecting',
+      });
+      handle.onPeers(peers => setCollab(current =>
+        current?.room === invite.room ? { ...current, peers } : current));
+      handle.onStatus(status => setCollab(current =>
+        current?.room === invite.room ? { ...current, status } : current));
+      handle.onReady(() => {
+        if (mode === 'host') {
+          navigator.clipboard.writeText(handle.ticket)
+            .then(() => notify('Encrypted collaboration started — invitation copied to the clipboard.', 'success'))
+            .catch(() => notify('Encrypted collaboration started. Use “Copy collaboration invitation” to share it.', 'success'));
+        } else {
+          notify(`Joined the encrypted session for ${sharedFile}.`, 'success');
+        }
+      });
+      handle.onError(message => {
+        if (collabRef.current === handle) collabRef.current = null;
+        setCollab(current => current?.room === invite.room ? null : current);
+        notify(message);
+      });
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not start collaboration.');
+    }
+  };
+
+  const hostCollab = async () => {
+    if (!editorRef.current?.getModel()) {
+      notify('Open a text file before starting collaboration.');
+      return;
+    }
+    const protocol = await import('./collabProtocol');
+    let urls: string[] = [];
+    try {
+      const response = await fetch(`${API}/collab/info`);
+      if (response.ok) {
+        const info = await response.json();
+        urls = Array.isArray(info.urls) ? info.urls.filter((url: unknown) => typeof url === 'string') : [];
+      }
+    } catch {}
+    const configured = configuredCollabServer();
+    const suggested = configured || urls.find(url => !url.includes('127.0.0.1')) || urls[0] || '';
+    setInputModal({
+      title: 'Host an encrypted collaboration',
+      submitLabel: 'Start & Copy Invite',
+      fields: [
+        {
+          key: 'server',
+          label: 'Address collaborators can reach',
+          default: suggested,
+          placeholder: 'ws://10.20.30.40:3020',
+          options: Array.from(new Set([...urls, ...(configured ? [configured] : [])])),
+          hint: 'Use the detected campus/LAN address, or enter your own Hilbert server. The workspace API is never exposed.',
+        },
+        {
+          key: 'name',
+          label: 'Your display name',
+          default: localStorage.getItem('collab_name') || '',
+          placeholder: 'Kazi',
+        },
+      ],
+      onSubmit: async values => {
+        const url = protocol.normalizeCollabServerUrl(values.server || '');
+        if (!url) {
+          notify('Enter a valid ws:// or wss:// collaboration server address.');
+          return;
+        }
+        const name = (values.name || '').trim().slice(0, 48);
+        if (name) localStorage.setItem('collab_name', name);
+        const session = protocol.newCollabSession();
+        await beginCollab({ url, ...session }, 'host');
+      },
+    });
+  };
+
+  const joinCollab = () => {
+    setInputModal({
+      title: 'Join an encrypted collaboration',
+      submitLabel: 'Join',
+      fields: [
+        {
+          key: 'ticket',
+          label: 'Invitation',
+          placeholder: 'hilbert-collab://join?…',
+          hint: 'The invitation contains a one-session encryption key. Share it only with intended collaborators.',
+        },
+        {
+          key: 'name',
+          label: 'Your display name',
+          default: localStorage.getItem('collab_name') || '',
+          placeholder: 'Guest',
+        },
+      ],
+      onSubmit: async values => {
+        const { parseCollabTicket } = await import('./collabProtocol');
+        const invite = parseCollabTicket(values.ticket || '');
+        if (!invite) {
+          notify('That invitation is invalid or uses the older unencrypted format.');
+          return;
+        }
+        const name = (values.name || '').trim().slice(0, 48);
+        if (name) localStorage.setItem('collab_name', name);
+        await beginCollab(invite, 'join');
+      },
+    });
+  };
+
+  const stopCollab = () => {
+    collabRef.current?.stop();
+    collabRef.current = null;
+    setCollab(null);
+    notify('Left the collaboration session.', 'info');
+  };
+
+  useEffect(() => () => {
+    collabRef.current?.stop();
+    collabRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    const sharedFile = collab?.file;
+    if (!sharedFile || sharedFile === activeTabPath) return;
+    collabRef.current?.stop();
+    collabRef.current = null;
+    setCollab(null);
+    notify(`Left collaboration on ${sharedFile} after switching files.`, 'info');
+  }, [activeTabPath, collab?.file]);
+
   const copyToClipboard = (text: string) => navigator.clipboard.writeText(text);
   const collectDirPaths = (nodes: FileNode[], acc: string[] = []): string[] => {
     for (const n of nodes) {
@@ -3727,6 +3902,43 @@ export default function App() {
     { category: 'Edit', title: 'Toggle Equation Numbering (all)', run: toggleEquationNumbering },
     { category: 'Edit', title: 'Document Settings...', run: () => setShowEditSettings(true) },
     { category: 'File', title: 'New Window', run: openNewWindow },
+    { category: 'Collaborate', title: 'Host an encrypted live session…', run: hostCollab },
+    { category: 'Collaborate', title: 'Join an encrypted live session…', run: joinCollab },
+    { category: 'Collaborate', title: 'Set optional collaboration server…', run: () => setInputModal({
+      title: 'Optional collaboration server',
+      submitLabel: 'Save',
+      fields: [{
+        key: 'url',
+        label: 'Server address',
+        default: configuredCollabServer(),
+        placeholder: 'wss://sync.example.edu:3020',
+        hint: 'Optional: run “hilbert --sync-server” on a reachable machine. Clear this value to prefer direct hosting.',
+      }],
+      onSubmit: async values => {
+        const raw = (values.url || '').trim();
+        if (!raw) {
+          localStorage.removeItem('collab_server');
+          notify('Direct campus/LAN hosting will be preferred.', 'success');
+          return;
+        }
+        const { normalizeCollabServerUrl } = await import('./collabProtocol');
+        const url = normalizeCollabServerUrl(raw);
+        if (!url) {
+          notify('Enter a valid ws:// or wss:// address.');
+          return;
+        }
+        localStorage.setItem('collab_server', url);
+        notify(`Collaboration server set to ${url}`, 'success');
+      },
+    }) },
+    ...(collab ? [{
+      category: 'Collaborate',
+      title: 'Copy collaboration invitation',
+      run: () => navigator.clipboard.writeText(collab.ticket)
+        .then(() => notify('Collaboration invitation copied.', 'success'))
+        .catch(() => notify('Could not copy the collaboration invitation.')),
+    }] : []),
+    ...(collab ? [{ category: 'Collaborate', title: 'Leave the session', run: stopCollab }] : []),
     { category: 'View', title: 'Toggle Sidebar', run: toggleSidebar },
     ...(Object.keys(PANEL_LABELS) as PanelKey[]).map(key => ({
       category: 'View', title: `Show / Hide ${PANEL_LABELS[key]}`, run: () => togglePanel(key),
@@ -4141,6 +4353,22 @@ export default function App() {
         )}
 
         <div className="header-right">
+          {collab && (
+            <button
+              className="theme-toggle"
+              onClick={stopCollab}
+              style={{
+                color: collab.status === 'connected' || collab.status === 'synced' ? '#34d399' : '#f59e0b',
+                borderColor: collab.status === 'connected' || collab.status === 'synced' ? '#34d399' : '#f59e0b',
+              }}
+              title={`End-to-end encrypted collaboration on ${collab.file} (${collab.peers} here, ${collab.status}). Click to leave.`}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              </svg>
+              <span style={{ marginLeft: 4, fontSize: '0.7rem', fontWeight: 700 }}>{collab.peers}</span>
+            </button>
+          )}
           {PROOFREAD_FEATURE_ENABLED && proof.available && (
             <button
               className="theme-toggle"
@@ -4828,7 +5056,20 @@ export default function App() {
       )}
       {showFigureBuilder && <Suspense fallback={null}><FigureBuilder onClose={() => setShowFigureBuilder(false)} onInsert={(code) => { insertCode(code); setShowFigureBuilder(false); }} /></Suspense>}
       {showEditSettings && <Suspense fallback={null}><EditSettings onClose={() => setShowEditSettings(false)} editorRef={editorRef} monaco={monaco} /></Suspense>}
-      {showDriveSync && <Suspense fallback={null}><DriveSyncModal onClose={() => setShowDriveSync(false)} projectName={projectName} /></Suspense>}
+      {showDriveSync && <Suspense fallback={null}><DriveSyncModal
+        onClose={() => setShowDriveSync(false)}
+        projectName={projectName}
+        liveSession={collab}
+        onHostLive={hostCollab}
+        onJoinLive={joinCollab}
+        onCopyLiveInvite={() => {
+          if (!collab) return;
+          navigator.clipboard.writeText(collab.ticket)
+            .then(() => notify('Collaboration invitation copied.', 'success'))
+            .catch(() => notify('Could not copy the collaboration invitation.'));
+        }}
+        onLeaveLive={stopCollab}
+      /></Suspense>}
       {showAppSettings && <Suspense fallback={null}><AppSettingsModal onClose={() => setShowAppSettings(false)}
         theme={theme} onTheme={setTheme}
         fontSize={editorFontSize} onFontSize={setEditorFontSize}

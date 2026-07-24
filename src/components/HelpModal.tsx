@@ -78,6 +78,7 @@ const SECTIONS: Section[] = [
       { title: 'Git & GitHub', where: 'Settings → Git & GitHub', desc: 'Version-control the workspace locally, commit, and push to GitHub with a personal access token (used once per push, never stored).' },
       { title: 'Export', where: 'File → Save As / Export', desc: 'PDF (combined PDF/UA and PDF/A standards, accessibility preflight, tagging, page ranges), PNG, SVG, HTML, experimental multi-file bundle, plain .typ, or the whole project folder.' },
       { title: 'HTML preview', where: 'View → HTML Preview', desc: 'Experimental Typst HTML/MathML preview, capability-gated by the installed Typst compiler.' },
+      { title: 'Live collaboration', where: 'Command Palette → Collaborate', desc: 'Host an end-to-end encrypted editing session directly on a campus/LAN address, join from an invitation, or use an optional self-hosted Hilbert relay.' },
       { title: 'Folder sync', where: 'Share button', desc: 'Mirror the project into a synced folder (Google Drive, Dropbox…) or a WebDAV server (Nextcloud).' },
       { title: 'Custom fonts', where: 'File → Import Font', desc: 'Import .ttf/.otf files and use them with #set text(font: "…").' },
     ],

@@ -6,7 +6,7 @@ mod proofread;
 mod server;
 
 use std::fs;
-use std::net::TcpListener;
+use std::net::{TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -52,6 +52,69 @@ fn bind_free_port(preferred: u16) -> (TcpListener, u16) {
     let l = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     let port = l.local_addr().unwrap().port();
     (l, port)
+}
+
+// The collaboration listener is deliberately separate from the loopback-only
+// workspace API. It may be reachable from the LAN/campus, but exposes only the
+// encrypted CRDT relay.
+fn bind_collab_port(preferred: u16) -> std::io::Result<(TcpListener, u16)> {
+    let listener = TcpListener::bind(("0.0.0.0", preferred))
+        .or_else(|_| TcpListener::bind(("0.0.0.0", 0)))?;
+    let port = listener.local_addr()?.port();
+    Ok((listener, port))
+}
+
+fn collab_addresses() -> Vec<String> {
+    let mut addresses = Vec::new();
+    // Connecting a UDP socket selects the interface the OS would use for a
+    // routed destination without sending any packet. This gives the useful
+    // campus/LAN address on the common single-active-interface setup.
+    if let Ok(socket) = UdpSocket::bind(("0.0.0.0", 0)) {
+        if socket.connect(("192.0.2.1", 9)).is_ok() {
+            if let Ok(local) = socket.local_addr() {
+                if !local.ip().is_loopback() {
+                    addresses.push(local.ip().to_string());
+                }
+            }
+        }
+    }
+    addresses.push("127.0.0.1".into());
+    addresses.dedup();
+    addresses
+}
+
+fn start_embedded_sync_server() {
+    // HILBERT_COLLAB=0 keeps the app strictly loopback-only for setups where
+    // even an encrypted, room-gated listener on the LAN is unwanted.
+    if matches!(
+        std::env::var("HILBERT_COLLAB").ok().as_deref(),
+        Some("0") | Some("off")
+    ) {
+        eprintln!("[hilbert-collab] direct session listener disabled by HILBERT_COLLAB");
+        return;
+    }
+    let preferred = std::env::var("HILBERT_COLLAB_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3020);
+    match bind_collab_port(preferred) {
+        Ok((listener, port)) => {
+            let addresses = collab_addresses();
+            server::set_embedded_collab_server(port, addresses.clone());
+            eprintln!(
+                "[hilbert-collab] direct session listener on {}",
+                addresses
+                    .iter()
+                    .map(|address| format!("ws://{address}:{port}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            tauri::async_runtime::spawn(server::serve_sync_server(listener));
+        }
+        Err(error) => {
+            eprintln!("[hilbert-collab] direct session listener unavailable: {error}");
+        }
+    }
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -170,6 +233,17 @@ fn init_script(api_token: &str) -> String {
     ) + INIT_SCRIPT
 }
 
+fn sync_server_main() {
+    let port: u16 = arg_value("--port").and_then(|p| p.parse().ok()).unwrap_or(3020);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(async {
+        let listener = TcpListener::bind(("0.0.0.0", port)).expect("bind sync server port");
+        println!("Hilbert collaboration server on ws://0.0.0.0:{port}/collab/<room>");
+        println!("Collaborators connect to: ws://<this-machine-ip>:{port}");
+        server::serve_sync_server(listener).await;
+    });
+}
+
 fn headless_main() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async {
@@ -188,6 +262,7 @@ fn headless_main() {
         // off by default, so they load on the first /lint call instead of at boot.
         println!("Typst compiler server running on http://127.0.0.1:{port}");
         println!("  code execution: {}", if state.allow_exec { "ENABLED (sandbox/)" } else { "disabled" });
+        start_embedded_sync_server();
         server::serve(listener, state).await;
     });
 }
@@ -283,6 +358,12 @@ fn main() {
         headless_main();
         return;
     }
+    // Run purely as a collaboration sync server (e.g. on a Pi or a campus box):
+    //   hilbert --sync-server --port 3020
+    if std::env::args().any(|a| a == "--sync-server") {
+        sync_server_main();
+        return;
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -328,6 +409,7 @@ fn main() {
 
             let resource_dir = app.path().resource_dir().ok();
             set_bundled_tinymist(resource_dir.as_deref());
+            start_embedded_sync_server();
 
             // Built UI: bundled resource, overridable for development.
             let dist = std::env::var("TYPST_DIST")
