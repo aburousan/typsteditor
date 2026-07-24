@@ -30,6 +30,8 @@ rides inside the invitation you share, so treat an invitation like a password.
 5. Start the session. The invitation is copied to your clipboard. Send it to the people
    you want to edit with.
 
+![Hosting an encrypted collaboration in Hilbert](collab-host.png)
+
 The invitation looks like this:
 
 ```
@@ -47,6 +49,8 @@ can join and read the file, so send it over a channel you trust.
 3. Enter your display name.
 4. Join. The shared file takes over the tab you had open, and from then on you and the
    host see each other's edits and cursors as they happen.
+
+![A joined encrypted collaboration session, with the participant badge in the header](collab-session.png)
 
 While a session is running, a small badge in the header shows how many people are
 connected. Click it to leave. Leaving also clears your cursor from everyone else's
