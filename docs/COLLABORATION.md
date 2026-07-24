@@ -113,6 +113,13 @@ collaboration server", and enter it, for example `ws://<relay address>:3020`. Af
 that, hosting uses the relay automatically, so whoever starts a session no longer has to
 stay online for the rest. As long as the relay is up, the session stays alive.
 
+A relay is also the faster setup, not just the more reliable one. Every edit already
+travels through a relay in any session; the only choice is whose machine plays that
+role. Put it on a well-placed box that both people reach over a short, direct route,
+like a server on the campus network everyone is wired into, and the round trip is small.
+That usually beats connecting through a slow overlay or across two home routers, where
+the path wanders before it ever gets to the other person.
+
 For a machine that should survive reboots, run the server under a process manager, either
 systemd or a quick `tmux`/`screen` session, so it comes back on its own.
 
